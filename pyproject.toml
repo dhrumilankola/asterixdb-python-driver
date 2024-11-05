@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyasterix"
+version = "0.1.0"
+description = "Python connector for AsterixDB"
+dependencies = [
+    "requests>=2.25.0",  # Example dependency, add others as needed
+]
+python = ">=3.7"
+
+# Optional: Configuration for development tools
+[tool.black]
+line-length = 88
+
+[tool.mypy]
+strict = true
+
+[tool.pytest.ini_options]
+
+pythonpath = [
+    "src"
+]
