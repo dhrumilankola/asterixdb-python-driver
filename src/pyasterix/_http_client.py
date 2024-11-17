@@ -157,69 +157,85 @@ class AsterixDBHttpClient:
         return {}
 
     def execute_query(
-        self,
-        statement: str,
-        mode: str = "immediate",
-        params: Optional[Dict[str, Any]] = None,
-        pretty: bool = False,
-        client_context_id: Optional[str] = None,
-        dataverse: Optional[str] = None,
-        readonly: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Execute a query using the specified mode.
-        
-        Args:
-            statement: Query string to be executed
-            mode: Query execution mode ('immediate', 'deferred', 'async')
-            params: Additional query parameters
-            pretty: Format response in a readable way
-            client_context_id: Optional client context ID for tracking
-            dataverse: Specific dataverse to use for the query
-            readonly: Boolean flag for readonly queries
+            self,
+            statement: str,
+            mode: str = "immediate",
+            params: Optional[Dict[str, Any]] = None,
+            pretty: bool = False,
+            client_context_id: Optional[str] = None,
+            dataverse: Optional[str] = None,
+            readonly: bool = False
+        ) -> Dict[str, Any]:
+            """
+            Execute a query using the specified mode.
             
-        Returns:
-            Query result as a dictionary
-            
-        Raises:
-            QueryExecutionError: If query execution fails
-            ConnectionTimeoutError: If connection times out
-            InvalidJSONResponseError: If response isn't valid JSON
-        """
-        if not isinstance(statement, str):
-            raise TypeError("Query statement must be a string")
-    
-        if mode not in ("immediate", "deferred", "async"):
-            raise ValueError(f"Invalid mode: {mode}")
+            Args:
+                statement: Query string to be executed
+                mode: Query execution mode ('immediate', 'deferred', 'async')
+                params: Additional query parameters
+                pretty: Format response in a readable way
+                client_context_id: Optional client context ID for tracking
+                dataverse: Specific dataverse to use for the query
+                readonly: Boolean flag for readonly queries
                 
-        endpoint = "/query/service"
-        
-        # Prepare request data
-        data = {
-            "statement": statement,
-            "mode": mode,
-            "pretty": pretty,
-            "readonly": readonly
-        }
-        
-        if params:
-            data.update(params)
-        if client_context_id:
-            data["client_context_id"] = client_context_id
-        if dataverse:
-            data["dataverse"] = dataverse
+            Returns:
+                Query result as a dictionary
+                
+            Raises:
+                QueryExecutionError: If query execution fails
+                ConnectionTimeoutError: If connection times out
+                InvalidJSONResponseError: If response isn't valid JSON
+            """
+            if not isinstance(statement, str):
+                raise TypeError("Query statement must be a string")
+            if mode not in ("immediate", "deferred", "async"):
+                raise ValueError(f"Invalid mode: {mode}")
+            
+            endpoint = "/query/service"
+            
+            # Prepare request data with clean spacing
+            data = {
+                "statement": statement.strip(),
+                "mode": mode,
+                "pretty": pretty
+            }
+            if client_context_id:
+                data["client_context_id"] = client_context_id
+            if dataverse:
+                data["dataverse"] = dataverse
+            if params:
+                data.update(params)
+            
+            logger.debug(f"Executing query with payload: {json.dumps(data, indent=2)}")
+            
+            try:
+                response = self.session.post(
+                    urljoin(self.base_url, endpoint),
+                    json=data,
+                    timeout=self.timeout
+                )
+                
+                logger.debug(f"Response status code: {response.status_code}")
+                logger.debug(f"Response content: {response.text}")
+                
+                # Check for errors
+                try:
+                    response.raise_for_status()
+                except requests.exceptions.HTTPError as e:
+                    if response.status_code == 500:
+                        print("Server Error Details:", response.text)  # Print full error details from the server
+                    raise QueryExecutionError(f"Request failed: {str(e)}") from e
+                
+                try:
+                    return response.json()
+                except ValueError as e:
+                    logger.error("Failed to parse JSON response.")
+                    raise QueryExecutionError("Failed to parse JSON response.") from e
+                    
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Request failed: {str(e)}")
+                raise QueryExecutionError(f"Request failed: {str(e)}") from e
 
-        logger.info(f"Executing query in {mode} mode")
-        logger.debug(f"Query statement: {statement}")
-        
-        initial_response = self._make_request('POST', urljoin(self.base_url, endpoint), data=data)
-
-        if mode == "immediate":
-            return initial_response
-        elif mode == "async":
-            return self._handle_async_query(initial_response)
-        else:
-            return initial_response
 
     # def _handle_non_immediate_query(
     #     self,
