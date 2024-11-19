@@ -61,42 +61,24 @@ def test_basic_operations():
         # Test find operations
         print("\n6. Testing find operations...")
         
-        # Find all active users
-        print("\na) Finding all active users:")
-        active_users = client.find(
-            "Users",
-            condition={"is_active": True},
-            projection=["id", "name", "email"]
-        )
-        pprint(active_users)
-        
-        # Find users older than 30
-        print("\nb) Finding users older than 30:")
-        older_users = client.find(
-            "Users",
-            condition={"age": {"$gt": 30}},
-            projection=["name", "age"]
-        )
-        pprint(older_users)
-        
-        # Find premium users ordered by age
-        print("\nc) Finding premium users ordered by age:")
-        premium_users = client.find(
-            "Users",
-            condition={"tags": {"$contains": "premium"}},
-            projection=["name", "age", "tags"],
-            order_by={"age": "ASC"}
-        )
-        pprint(premium_users)
-        
-        # Test find_one
-        print("\nd) Finding one user by ID:")
+        print("\na) Finding all users:")
+        users = client.find("Users")
+        pprint(users)
+
+        print("\nb) Finding user by ID:")
         user = client.find_one(
             "Users",
             condition={"id": 1}
         )
         pprint(user)
-        
+
+        print("\nc) Finding users with projection:")
+        users = client.find(
+            "Users",
+            projection=["name", "email"]
+        )
+        pprint(users)
+                
         # Test count
         print("\n7. Testing count operations...")
         
@@ -123,17 +105,56 @@ def test_basic_operations():
         ])
         print("User statistics by active status:")
         pprint(stats)
+
+        # Test update operations
+        print("\n9. Testing update operations...")
+
+        # Update single user
+        print("\na) Updating user name:")
+        update_result = client.update(
+            dataset="Users",
+            condition={"id": 1},
+            updates={"name": "John Smith"}
+        )
+        print("Update result:", update_result)
+
+        # Verify update
+        updated_user = client.find_one("Users", {"id": 1})
+        print("User after name update:", updated_user)
+
+        # Update multiple fields
+        print("\nb) Updating multiple fields:")
+        update_result = client.update(
+            dataset="Users",
+            condition={"id": 2},
+            updates={
+                "name": "Jane Doe",
+                "email": "jane.doe@example.com"
+            }
+        )
+        print("Update result:", update_result)
+
+        # Verify multiple updates
+        updated_user = client.find_one("Users", {"id": 2})
+        print("User after multiple field updates:", updated_user)
+
+        # Verify all changes
+        print("\nc) All users after updates:")
+        all_users = client.find("Users")
+        pprint(all_users)
+        
+        print("\n10. Cleaning up...")
+        # Drop in reverse order of creation
+        client.drop_dataset("Users", if_exists=True)
+        client.drop_type("UserType", if_exists=True)
+        client.drop_dataverse("TestDataverse", if_exists=True)
         
     except Exception as e:
         print(f"Error occurred: {str(e)}")
-        raise
-    
     finally:
-        # # Cleanup
-        # print("\n9. Cleaning up...")
-        # client.drop_dataverse("TestDataverse")
         client.close()
-        print("Test completed and cleanup done")
+        print("\nTest completed and cleanup done")
 
 if __name__ == "__main__":
     test_basic_operations()
+
