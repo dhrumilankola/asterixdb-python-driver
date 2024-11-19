@@ -1,5 +1,1 @@
-{% if if_exists %}
-DROP DATAVERSE IF EXISTS {{ name }};
-{% else %}
-DROP DATAVERSE {{ name }};
-{% endif %}
+DROP DATAVERSE {% if if_exists %}IF EXISTS {% endif %}{{name}};

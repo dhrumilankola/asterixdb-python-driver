@@ -1,5 +1,2 @@
-{% if if_exists %}
-DROP DATASET {{ current_dataverse }}.{{ name }} IF EXISTS;
-{% else %}
-DROP DATASET {{ current_dataverse }}.{{ name }};
-{% endif %}
+USE {{current_dataverse}};
+DROP DATASET {% if if_exists %}IF EXISTS {% endif %}{{name}};

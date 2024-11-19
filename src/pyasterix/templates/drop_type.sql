@@ -1,5 +1,2 @@
-{% if if_exists %}
-DROP TYPE {{ current_dataverse }}.{{ name }} IF EXISTS;
-{% else %}
-DROP TYPE {{ current_dataverse }}.{{ name }};
-{% endif %}
+USE {{current_dataverse}};
+DROP TYPE {% if if_exists %}IF EXISTS {% endif %}{{name}};

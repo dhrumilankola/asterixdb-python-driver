@@ -58,10 +58,10 @@ class AsterixClient:
         )
         self._current_dataverse: Optional[str] = None
         
-        # Initialize Jinja2 environment for query templates
+        # Initialize Jinja2 environment with autoescape disabled
         self.env = Environment(
             loader=PackageLoader('src.pyasterix', 'templates'),
-            autoescape=select_autoescape(['sql']),
+            autoescape=False,  # Disable auto-escaping
             trim_blocks=True,
             lstrip_blocks=True
         )
@@ -154,11 +154,11 @@ class AsterixClient:
         if_exists: bool = True
     ) -> Dict[str, Any]:
         """
-        Drop an existing dataverse.
+        Drop a dataverse.
         
         Args:
             name: Name of the dataverse
-            if_exists: If True, won't error if dataverse doesn't exist
+            if_exists: If True, check existence before dropping
             
         Returns:
             Query execution result
@@ -166,20 +166,35 @@ class AsterixClient:
         if not self._is_valid_identifier(name):
             raise ValidationError(f"Invalid dataverse name: {name}")
         
-        template = self.env.get_template('drop_dataverse.sql')
-        query = template.render(
-            name=name,
-            if_exists=if_exists
-        )
-        
         try:
-            formatted_query = self._format_query(query)
-            result = self._http_client.execute_query(formatted_query)
+            if if_exists:
+                # Check if dataverse exists first
+                check_query = "SELECT VALUE dv FROM Metadata.`Dataverse` dv " + \
+                            f"WHERE dv.DataverseName = '{name}';"
+                
+                check_result = self._http_client.execute_query(check_query)
+                if not check_result.get('results', []):
+                    # Dataverse doesn't exist, return success
+                    return {'status': 'success', 'message': f'Dataverse {name} does not exist'}
+            
+            # Dataverse exists or if_exists is False, proceed with drop
+            drop_query = f"DROP DATAVERSE {name};"
+            
+            # Print for debugging
+            print("\nGenerated drop dataverse query:")
+            print(drop_query)
+            
+            result = self._http_client.execute_query(drop_query)
+            
             if result.get('status') == 'success' and name == self._current_dataverse:
                 self._current_dataverse = None
+                
             return result
+            
         except QueryExecutionError as e:
-            raise QueryExecutionError(f"Failed to drop dataverse {name}: {str(e)}")
+            if not if_exists:
+                raise QueryExecutionError(f"Failed to drop dataverse {name}: {str(e)}")
+            return {'status': 'success', 'message': f'Dataverse {name} does not exist'}
 
     def use_dataverse(self, name: str) -> Dict[str, Any]:
         """
@@ -262,11 +277,11 @@ class AsterixClient:
         if_exists: bool = True
     ) -> Dict[str, Any]:
         """
-        Drop an existing type from the current dataverse.
+        Drop a type from the current dataverse.
         
         Args:
             name: Name of the type
-            if_exists: If True, won't error if type doesn't exist
+            if_exists: If True, check existence before dropping
             
         Returns:
             Query execution result
@@ -277,33 +292,34 @@ class AsterixClient:
         if not self._is_valid_identifier(name):
             raise ValidationError(f"Invalid type name: {name}")
         
-        # Check if any datasets are using this type before dropping
-        check_query = f"""
-        SELECT VALUE dt FROM Metadata.`Datatype` dt 
-        WHERE dt.DataverseName = '{self._current_dataverse}' 
-        AND dt.DatatypeName = '{name}';
-        """
-        
         try:
-            # First check if type exists
-            formatted_check_query = self._format_query(check_query)
-            check_result = self._http_client.execute_query(formatted_check_query)
+            if if_exists:
+                # Check if type exists first
+                check_query = f"USE {self._current_dataverse};\n" + \
+                            f"SELECT VALUE dt FROM Metadata.`Datatype` dt " + \
+                            f"WHERE dt.DataverseName = '{self._current_dataverse}' " + \
+                            f"AND dt.DatatypeName = '{name}';"
+                
+                check_result = self._http_client.execute_query(check_query)
+                if not check_result.get('results', []):
+                    # Type doesn't exist, return success
+                    return {'status': 'success', 'message': f'Type {name} does not exist'}
             
-            if not if_exists and not check_result:
-                raise QueryExecutionError(f"Type {name} does not exist")
+            # Type exists or if_exists is False, proceed with drop
+            drop_query = f"USE {self._current_dataverse};\n" + \
+                        f"DROP TYPE {name};"
             
-            template = self.env.get_template('drop_type.sql')
-            query = template.render(
-                name=name,
-                if_exists=if_exists,
-                current_dataverse=self._current_dataverse
-            )
+            # Print for debugging
+            print("\nGenerated drop type query:")
+            print(drop_query)
             
-            formatted_query = self._format_query(query)
-            result = self._http_client.execute_query(formatted_query)
+            result = self._http_client.execute_query(drop_query)
             return result
+            
         except QueryExecutionError as e:
-            raise QueryExecutionError(f"Failed to drop type {name}: {str(e)}")
+            if not if_exists:
+                raise QueryExecutionError(f"Failed to drop type {name}: {str(e)}")
+            return {'status': 'success', 'message': f'Type {name} does not exist'}
 
     def create_dataset(
         self,
@@ -354,11 +370,11 @@ class AsterixClient:
         if_exists: bool = True
     ) -> Dict[str, Any]:
         """
-        Drop an existing dataset from the current dataverse.
+        Drop a dataset from the current dataverse.
         
         Args:
             name: Name of the dataset
-            if_exists: If True, won't error if dataset doesn't exist
+            if_exists: If True, check existence before dropping
             
         Returns:
             Query execution result
@@ -369,19 +385,34 @@ class AsterixClient:
         if not self._is_valid_identifier(name):
             raise ValidationError(f"Invalid dataset name: {name}")
         
-        template = self.env.get_template('drop_dataset.sql')
-        query = template.render(
-            name=name,
-            if_exists=if_exists,
-            current_dataverse=self._current_dataverse
-        )
-        
         try:
-            formatted_query = self._format_query(query)
-            result = self._http_client.execute_query(formatted_query)
+            if if_exists:
+                # Check if dataset exists first
+                check_query = f"USE {self._current_dataverse};\n" + \
+                            f"SELECT VALUE ds FROM Metadata.`Dataset` ds " + \
+                            f"WHERE ds.DataverseName = '{self._current_dataverse}' " + \
+                            f"AND ds.DatasetName = '{name}';"
+                
+                check_result = self._http_client.execute_query(check_query)
+                if not check_result.get('results', []):
+                    # Dataset doesn't exist, return success
+                    return {'status': 'success', 'message': f'Dataset {name} does not exist'}
+            
+            # Dataset exists or if_exists is False, proceed with drop
+            drop_query = f"USE {self._current_dataverse};\n" + \
+                        f"DROP DATASET {name};"
+            
+            # Print for debugging
+            print("\nGenerated drop dataset query:")
+            print(drop_query)
+            
+            result = self._http_client.execute_query(drop_query)
             return result
+            
         except QueryExecutionError as e:
-            raise QueryExecutionError(f"Failed to drop dataset {name}: {str(e)}")
+            if not if_exists:
+                raise QueryExecutionError(f"Failed to drop dataset {name}: {str(e)}")
+            return {'status': 'success', 'message': f'Dataset {name} does not exist'}
 
     def find(
         self,
@@ -391,47 +422,66 @@ class AsterixClient:
         order_by: Optional[Union[str, List[str], Dict[str, str]]] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
+        """
+        Find documents in a dataset based on given criteria.
+        """
         if not self._current_dataverse:
             raise AsterixClientError("No dataverse selected")
             
         if not self._is_valid_identifier(dataset):
             raise ValidationError(f"Invalid dataset name: {dataset}")
 
-        # Build projection clause
-        if projection:
-            if not all(self._is_valid_identifier(field) for field in projection):
-                raise ValidationError("Invalid field name in projection")
-            select_clause = ", ".join(projection)
-        else:
-            select_clause = "*"
-
         try:
-            query_parts = [f"SELECT {select_clause}", f"FROM {dataset}"]
-            
-            # Add WHERE clause
+            # Build SELECT clause
+            if projection:
+                if not all(self._is_valid_identifier(field.split('.')[0]) for field in projection):
+                    raise ValidationError("Invalid field name in projection")
+                select_clause = ", ".join(f"d.{field}" for field in projection)
+            else:
+                select_clause = "VALUE d"
+
+            # Build WHERE clause with proper field handling
+            where_clause = None
             if condition:
-                where_clause = self._build_condition(condition)
-                if where_clause:
-                    query_parts.append(f"WHERE {where_clause}")
-            
-            # Add ORDER BY clause
+                where_clause = self._build_condition("d", condition)
+
+            # Build ORDER BY clause
+            order_clause = None
             if order_by:
-                order_clause = self._build_order_by(order_by)
-                if order_clause:
-                    query_parts.append(f"ORDER BY {order_clause}")
+                order_clause = self._build_order_by("d", order_by)
+
+            # Prepare template context
+            context = {
+                "select_clause": select_clause,
+                "dataset": f"{dataset} d",
+                "where_clause": where_clause,
+                "order_clause": order_clause,
+                "limit": limit,
+                "offset": offset
+            }
+
+            # Get the template and render it
+            template = self.env.get_template("select.sql")
+            query = template.render(**context)
             
-            # Add LIMIT and OFFSET
-            if limit is not None:
-                query_parts.append(f"LIMIT {limit}")
-            if offset is not None:
-                query_parts.append(f"OFFSET {offset}")
+            # Add USE dataverse statement
+            full_query = f"USE {self._current_dataverse};\n{query}"
             
-            query = " ".join(query_parts)
-            formatted_query = self._format_query(query)
-            return self._http_client.execute_query(formatted_query)
+            # Print for debugging
+            print("\nGenerated query:")
+            print(full_query)
             
+            # Execute the query
+            result = self._http_client.execute_query(full_query)
+            
+            if result.get('status') == 'success':
+                return result.get('results', [])
+            else:
+                raise QueryExecutionError(f"Query failed with status: {result.get('status')}")
+                
         except Exception as e:
+            logger.error(f"Find query failed: {str(e)}")
             raise QueryExecutionError(f"Failed to execute find query: {str(e)}")
 
     def find_one(
@@ -440,24 +490,41 @@ class AsterixClient:
         condition: Optional[Dict[str, Any]] = None,
         projection: Optional[List[str]] = None
     ) -> Optional[Dict[str, Any]]:
-        result = self.find(
+        """
+        Find a single document matching the criteria.
+        
+        Args:
+            dataset: Name of the dataset to query
+            condition: Query conditions
+            projection: Fields to include in the result
+            
+        Returns:
+            Matching document or None if not found
+        """
+        results = self.find(
             dataset=dataset,
             condition=condition,
             projection=projection,
             limit=1
         )
         
-        if result.get('status') == 'success' and isinstance(result.get('results'), list):
-            results = result['results']
-            if results:
-                return results[0]
-        return None
+        return results[0] if results else None
 
     def count(
         self,
         dataset: str,
         condition: Optional[Dict[str, Any]] = None
     ) -> int:
+        """
+        Count documents in a dataset matching the condition.
+        
+        Args:
+            dataset: Name of the dataset
+            condition: Optional filter condition
+            
+        Returns:
+            Number of matching documents
+        """
         if not self._current_dataverse:
             raise AsterixClientError("No dataverse selected")
             
@@ -465,26 +532,36 @@ class AsterixClient:
             raise ValidationError(f"Invalid dataset name: {dataset}")
 
         try:
-            # Build count query directly instead of using template
-            query_parts = [f"SELECT COUNT(*) as count", f"FROM {dataset}"]
+            # Build the count query
+            query_parts = ["USE", self._current_dataverse + ";"]
+            query_parts.extend(["SELECT COUNT(*) as count", f"FROM {dataset} d"])
             
+            # Add WHERE clause if condition exists
             if condition:
-                where_clause = self._build_condition(condition)
+                where_clause = self._build_condition("d", condition)
                 if where_clause:
                     query_parts.append(f"WHERE {where_clause}")
             
-            query = " ".join(query_parts)
-            formatted_query = self._format_query(query)
-            result = self._http_client.execute_query(formatted_query)
+            # Join all parts
+            query = " ".join(query_parts) + ";"
+            
+            # Debug print
+            print("\nGenerated count query:")
+            print(query)
+            
+            # Execute query
+            result = self._http_client.execute_query(query)
             
             if result.get('status') == 'success' and isinstance(result.get('results'), list):
                 count_result = result['results'][0]
                 if isinstance(count_result, dict):
                     return int(count_result.get('count', 0))
                 return 0
+                
             raise QueryExecutionError("Invalid count query response format")
             
         except Exception as e:
+            logger.error(f"Count query failed: {str(e)}")
             raise QueryExecutionError(f"Failed to execute count query: {str(e)}")
 
     def aggregate(
@@ -501,16 +578,6 @@ class AsterixClient:
             
         Returns:
             Aggregation results
-            
-        Example:
-            client.aggregate("users", [
-                {"$group": {
-                    "by": ["status"],
-                    "count": {"$count": "*"},
-                    "avg_age": {"$avg": "age"}
-                }},
-                {"$order_by": {"count": "DESC"}}
-            ])
         """
         if not self._current_dataverse:
             raise AsterixClientError("No dataverse selected")
@@ -518,44 +585,144 @@ class AsterixClient:
         if not self._is_valid_identifier(dataset):
             raise ValidationError(f"Invalid dataset name: {dataset}")
 
-        template = self.env.get_template('aggregate.sql')
-        
-        try:
-            agg_query = self._build_aggregation(dataset, pipeline)
-            query = template.render(query=agg_query)
+        def build_group_expr(group_spec: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+            """Build GROUP BY and aggregate expressions"""
+            group_by = []
+            aggregates = []
             
-            formatted_query = self._format_query(query)
-            result = self._http_client.execute_query(formatted_query)
-            return result
+            by_fields = group_spec.get("by", [])
+            if isinstance(by_fields, str):
+                by_fields = [by_fields]
+                
+            for field in by_fields:
+                if not self._is_valid_identifier(field.split('.')[-1]):
+                    raise ValidationError(f"Invalid group by field: {field}")
+                group_by.append(f"d.{field}")
+                
+            for field, agg in group_spec.items():
+                if field == "by":
+                    continue
+                    
+                if isinstance(agg, dict):
+                    op = next(iter(agg))
+                    if op not in {"$sum", "$avg", "$min", "$max", "$count", "$array_agg"}:
+                        raise ValidationError(f"Unknown aggregation operator: {op}")
+                    
+                    op_name = op[1:].upper()  # Remove $ and uppercase
+                    field_expr = agg[op]
+                    
+                    if field_expr == "*":
+                        if op_name == "COUNT":
+                            # Use AS for column alias
+                            aggregates.append(f"COUNT(*) AS {field}")
+                        else:
+                            raise ValidationError(f"Operator {op} cannot be used with '*'")
+                    else:
+                        # Use AS for column alias
+                        aggregates.append(f"{op_name}(d.{field_expr}) AS {field}")
+            
+            return group_by, aggregates
+
+        try:
+            query_parts = [f"USE {self._current_dataverse};"]
+            
+            for stage in pipeline:
+                if len(stage) != 1:
+                    raise ValidationError("Each pipeline stage should have exactly one operator")
+                    
+                op = next(iter(stage))
+                
+                if op == "$group":
+                    group_by, aggregates = build_group_expr(stage[op])
+                    
+                    # Construct SELECT and FROM clauses
+                    select_clause = f"SELECT {', '.join(aggregates)}" if aggregates else "SELECT VALUE d"
+                    query_parts.append(select_clause)
+                    query_parts.append(f"FROM {dataset} d")
+                    
+                    # Add GROUP BY after FROM
+                    if group_by:
+                        query_parts.append(f"GROUP BY {', '.join(group_by)}")
+                
+                elif op == "$filter" or op == "$where":
+                    where_clause = self._build_condition("d", stage[op])
+                    if where_clause:
+                        query_parts.append(f"WHERE {where_clause}")
+                
+                elif op == "$order_by":
+                    order_clause = self._build_order_by("d", stage[op])
+                    if order_clause:
+                        query_parts.append(f"ORDER BY {order_clause}")
+                
+                elif op == "$limit":
+                    limit = int(stage[op])
+                    query_parts.append(f"LIMIT {limit}")
+                
+                elif op == "$offset":
+                    offset = int(stage[op])
+                    query_parts.append(f"OFFSET {offset}")
+                
+                else:
+                    raise ValidationError(f"Unknown pipeline operator: {op}")
+
+            # Join query parts and format
+            query = " ".join(query_parts) + ";"
+            
+            # Debug print
+            print("\nGenerated aggregation query:")
+            print(query)
+            
+            # Execute query
+            result = self._http_client.execute_query(query)
+            
+            if result.get('status') == 'success':
+                return result.get('results', [])
+            else:
+                raise QueryExecutionError(f"Query failed with status: {result.get('status')}")
+                
         except Exception as e:
+            logger.error(f"Aggregation failed: {str(e)}")
             raise QueryExecutionError(f"Failed to execute aggregation query: {str(e)}")
 
-    def _build_order_by(
-        self,
-        order_spec: Union[str, List[str], Dict[str, str]]
-    ) -> str:
-        """Build ORDER BY clause from specification."""
+    def _build_order_by(self, alias: str, order_spec: Union[str, List[str], Dict[str, str]]) -> Optional[str]:
+        """
+        Build ORDER BY clause from specification for SQL++.
+        
+        Args:
+            alias: Table alias to use for field references
+            order_spec: Ordering specification
+            
+        Returns:
+            ORDER BY clause string or None if no ordering
+            
+        Raises:
+            ValidationError: If ordering specification is invalid
+        """
+        if not order_spec:
+            return None
+            
+        def format_field(field: str) -> str:
+            """Format field reference with alias"""
+            if not self._is_valid_identifier(field):
+                raise ValidationError(f"Invalid order field: {field}")
+            return f"{alias}.{field}" if alias else field
+
         if isinstance(order_spec, str):
-            if not self._is_valid_identifier(order_spec):
-                raise ValidationError(f"Invalid order field: {order_spec}")
-            return order_spec
+            return format_field(order_spec)
             
         elif isinstance(order_spec, list):
-            if not all(self._is_valid_identifier(field) for field in order_spec):
-                raise ValidationError("Invalid order field in list")
-            return ", ".join(order_spec)
+            return ", ".join(format_field(field) for field in order_spec)
             
         elif isinstance(order_spec, dict):
             clauses = []
             for field, direction in order_spec.items():
-                if not self._is_valid_identifier(field):
-                    raise ValidationError(f"Invalid order field: {field}")
-                if direction.upper() not in ("ASC", "DESC"):
+                direction = direction.upper()
+                if direction not in ("ASC", "DESC"):
                     raise ValidationError(f"Invalid sort direction: {direction}")
-                clauses.append(f"{field} {direction.upper()}")
+                clauses.append(f"{format_field(field)} {direction}")
             return ", ".join(clauses)
             
-        raise ValidationError("Invalid order_by specification")
+        raise ValidationError(f"Invalid order_by specification type: {type(order_spec)}")
 
     def _build_aggregation(
         self,
@@ -835,7 +1002,7 @@ class AsterixClient:
         updates: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Update records in a dataset that match the condition.
+        Update records in a dataset that match the condition using UPSERT.
         
         Args:
             dataset: Name of the dataset
@@ -852,24 +1019,41 @@ class AsterixClient:
             raise ValidationError(f"Invalid dataset name: {dataset}")
         
         try:
-            where_clause = self._build_condition(condition)
-            set_clause = self._build_updates(updates)
-        except QueryBuildError as e:
-            raise ValidationError(f"Invalid condition or updates: {str(e)}")
-        
-        template = self.env.get_template('update.sql')
-        query = template.render(
-            dataset=dataset,
-            where_clause=where_clause,
-            set_clause=set_clause
-        )
-        
-        try:
+            # Build WHERE clause
+            where_parts = []
+            for field, value in condition.items():
+                if not self._is_valid_identifier(field.split('.')[0]):
+                    raise ValidationError(f"Invalid field name: {field}")
+                formatted_value = self._format_value(value)
+                where_parts.append(f"orig.{field} = {formatted_value}")
+            where_clause = " AND ".join(where_parts)
             
-            formated_query = self._format_query(query)
-            result = self._http_client.execute_query(formated_query)
+            # Format updates for template
+            formatted_updates = {}
+            for field, value in updates.items():
+                if not self._is_valid_identifier(field.split('.')[0]):
+                    raise ValidationError(f"Invalid field name: {field}")
+                formatted_updates[field] = self._format_value(value)
+            
+            # Get template and render query
+            template = self.env.get_template('upsert.sql')
+            query = template.render(
+                current_dataverse=self._current_dataverse,
+                dataset=dataset,
+                where_clause=where_clause,
+                updates=formatted_updates
+            )
+            
+            # Print for debugging
+            print("\nGenerated upsert query:")
+            print(query)
+            
+            # Execute query
+            result = self._http_client.execute_query(query)
             return result
-        except QueryExecutionError as e:
+            
+        except Exception as e:
+            logger.error(f"Update failed: {str(e)}")
             raise QueryExecutionError(f"Failed to update dataset {dataset}: {str(e)}")
 
     def _is_valid_identifier(self, name: str) -> bool:
@@ -882,13 +1066,8 @@ class AsterixClient:
     def _build_type_definition(self, schema: Dict[str, Any]) -> str:
         """
         Convert Python type definition to AsterixDB type definition.
-        
-        Args:
-            schema: Dictionary defining field types
-            
-        Returns:
-            AsterixDB type definition string
         """
+        # Base type mappings
         type_mapping = {
             "int": "int32",
             "int8": "tinyint",
@@ -908,7 +1087,8 @@ class AsterixClient:
             "circle": "circle",
             "rectangle": "rectangle",
             "polygon": "polygon",
-            "uuid": "uuid"
+            "uuid": "uuid",
+            # Add any other basic types here
         }
 
         def validate_identifier(name: str) -> str:
@@ -920,36 +1100,40 @@ class AsterixClient:
                 )
             return name
 
-        def get_type_definition(field_type: Union[str, List, Dict, Set]) -> str:
+        def get_type_definition(field_type: Union[str, List, Dict]) -> str:
             """Get the type definition without field name"""
             if isinstance(field_type, str):
+                # Handle multiset syntax
+                if field_type.startswith('{{') and field_type.endswith('}}'):
+                    inner_type = field_type[2:-2].strip()
+                    if inner_type not in type_mapping:
+                        raise TypeMappingError(f"Unsupported type in multiset: {inner_type}")
+                    return f"{{{{ {type_mapping[inner_type]} }}}}"
+                
                 # Handle optional types (ending with ?)
                 is_optional = field_type.endswith('?')
                 base_type = field_type[:-1] if is_optional else field_type
                 
-                if base_type not in type_mapping:
-                    raise TypeMappingError(f"Unsupported type: {base_type}")
+                # Check if it's a custom type (ends with 'Type')
+                if base_type.endswith('Type'):
+                    asterix_type = base_type  # Use the type name as-is
+                else:
+                    if base_type not in type_mapping:
+                        raise TypeMappingError(f"Unsupported type: {base_type}")
+                    asterix_type = type_mapping[base_type]
                     
-                asterix_type = type_mapping[base_type]
                 if is_optional:
                     asterix_type += '?'
                     
                 return asterix_type
-                
+                    
             elif isinstance(field_type, list):
                 # Handle ordered lists/arrays
                 if len(field_type) != 1:
                     raise TypeMappingError("Array type must have exactly one element type")
                 element_type = get_type_definition(field_type[0])
                 return f"[{element_type}]"
-                
-            elif isinstance(field_type, set):
-                # Handle unordered multisets
-                if len(field_type) != 1:
-                    raise TypeMappingError("Set type must have exactly one element type")
-                element_type = get_type_definition(next(iter(field_type)))
-                return f"{{{{ {element_type} }}}}"
-                
+                    
             elif isinstance(field_type, dict):
                 # Handle nested records
                 nested_fields = [
@@ -957,7 +1141,7 @@ class AsterixClient:
                     for k, v in field_type.items()
                 ]
                 return f"{{ {', '.join(nested_fields)} }}"
-            
+                
             raise TypeMappingError(f"Unsupported type structure: {field_type}")
 
         try:
@@ -1125,65 +1309,64 @@ class AsterixClient:
     #         raise QueryBuildError(f"Failed to build updates: {str(e)}")
 
 
-    def _build_condition(self, condition: Dict[str, Any]) -> str:
+    def _build_condition(self, alias: str, condition: Dict[str, Any]) -> str:
         """Build WHERE clause from condition dictionary."""
-        if not condition:
-            return None
-            
-        def format_value(value: Any) -> str:
-            if value is None:
-                return "NULL"
-            elif isinstance(value, bool):
-                return str(value).lower()
-            elif isinstance(value, (int, float)):
-                return str(value)
-            elif isinstance(value, str):
-                return f"'{value}'"
-            elif isinstance(value, (datetime, date)):
-                return f"datetime('{value.isoformat()}')"
-            elif isinstance(value, (list, tuple)):
-                return f"[{', '.join(format_value(v) for v in value)}]"
-            elif isinstance(value, dict):
-                return f"{json.dumps(value)}"
+        def format_field_ref(field: str) -> str:
+            """Format field reference with proper nesting"""
+            parts = field.split('.')
+            if len(parts) == 1:
+                return f"{alias}.{field}"
             else:
-                raise ValueError(f"Unsupported type for condition value: {type(value)}")
+                return f"{alias}.{'.'.join(parts)}"
 
         def build_comparison(field: str, operator: str, value: Any) -> str:
-            if operator == "$contains":
-                return f"{format_value(value)} IN {field}"
-            elif operator in ["$exists", "$notexists"]:
-                return f"{field} IS {'NOT ' if operator == '$exists' else ''}NULL"
+            """Build a comparison expression"""
+            field_ref = format_field_ref(field)
+            formatted_value = self._format_value(value)
+            
+            if operator == "$gt":
+                return f"{field_ref} > {formatted_value}"
+            elif operator == "$gte":
+                return f"{field_ref} >= {formatted_value}"
+            elif operator == "$lt":
+                return f"{field_ref} < {formatted_value}"
+            elif operator == "$lte":
+                return f"{field_ref} <= {formatted_value}"
+            elif operator == "$eq":
+                return f"{field_ref} = {formatted_value}"
+            elif operator == "$ne":
+                return f"{field_ref} != {formatted_value}"
+            elif operator == "$contains":
+                # For array containment in AsterixDB
+                return f"array_contains({field_ref}, {formatted_value})"
+            elif operator == "$in":
+                # For checking if value is in array
+                return f"{formatted_value} in {field_ref}"
             else:
-                op_map = {
-                    "$eq": "=",
-                    "$ne": "!=",
-                    "$gt": ">",
-                    "$gte": ">=",
-                    "$lt": "<",
-                    "$lte": "<=",
-                    "$like": "LIKE"
-                }
-                return f"{field} {op_map[operator]} {format_value(value)}"
+                raise ValidationError(f"Unsupported operator: {operator}")
 
-        def build_clause(field: str, value: Any) -> str:
-            if isinstance(value, dict):
-                # Handle operators
-                operator = next(iter(value))
-                return build_comparison(field, operator, value[operator])
-            else:
-                # Direct equality
-                return f"{field} = {format_value(value)}"
+        try:
+            if not condition:
+                return None
 
-        clauses = []
-        for field, value in condition.items():
-            if field in ["$and", "$or"]:
-                subclauses = [build_clause(k, v) for c in value for k, v in c.items()]
-                joiner = " AND " if field == "$and" else " OR "
-                clauses.append(f"({joiner.join(subclauses)})")
-            else:
-                clauses.append(build_clause(field, value))
+            clauses = []
+            for field, value in condition.items():
+                if isinstance(value, dict):
+                    # Handle operator conditions
+                    for op, op_value in value.items():
+                        clauses.append(build_comparison(field, op, op_value))
+                else:
+                    # Direct equality comparison
+                    field_ref = format_field_ref(field)
+                    formatted_value = self._format_value(value)
+                    clauses.append(f"{field_ref} = {formatted_value}")
 
-        return " AND ".join(clauses)
+            return " AND ".join(clauses)
+
+        except Exception as e:
+            logger.error(f"Failed to build condition: {str(e)}")
+            raise ValidationError(f"Failed to build condition: {str(e)}")
+
 
     def _format_value(self, value: Any) -> str:
         """Format a Python value for use in SQL++ query."""
@@ -1193,15 +1376,25 @@ class AsterixClient:
             return str(value)
         elif isinstance(value, bool):
             return str(value).lower()
-        elif isinstance(value, (datetime, date)):
-            return f"datetime('{value.isoformat()}')"
+        elif isinstance(value, datetime):
+            return f"datetime('{value.strftime('%Y-%m-%dT%H:%M:%S.%f%z')}')"
+        elif isinstance(value, date):
+            return f"date('{value.strftime('%Y-%m-%d')}')"
         elif isinstance(value, (list, tuple)):
             return f"[{', '.join(self._format_value(v) for v in value)}]"
         elif isinstance(value, dict):
-            return json.dumps(value)
+            formatted_pairs = []
+            for k, v in value.items():
+                formatted_value = self._format_value(v)
+                formatted_pairs.append(f'"{k}": {formatted_value}')
+            return f"{{{', '.join(formatted_pairs)}}}"
+        elif isinstance(value, str):
+            # Properly escape single quotes for SQL++ by doubling them
+            escaped_value = value.replace("'", "''")
+            return f"'{escaped_value}'"
         else:
-            return f"'{str(value)}'"
-
+            raise ValueError(f"Unsupported value type for SQL++: {type(value)}")
+        
     def close(self):
         """Close the client connection."""
         self._http_client.close()
