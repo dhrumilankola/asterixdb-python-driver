@@ -1,0 +1,1 @@
+DROP DATAVERSE {% if if_exists %}IF EXISTS {% endif %}{{name}};
