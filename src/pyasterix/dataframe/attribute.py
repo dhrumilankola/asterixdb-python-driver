@@ -41,6 +41,10 @@ class AsterixPredicate:
             left = self.left_pred.to_sql(alias)
             right = self.right_pred.to_sql(alias)
             return f"({left} {self.operator} {right})"
+        elif self.operator == "BETWEEN":
+            # Special case for BETWEEN: value is a tuple (value1, value2)
+            value1, value2 = self.value
+            return f"{alias}.{self.attribute.name} BETWEEN {value1} AND {value2}"
         elif self.operator in ("IS NULL", "IS NOT NULL"):
             return f"{alias}.{self.attribute.name} {self.operator}"
         else:
@@ -52,6 +56,9 @@ class AsterixPredicate:
             else:
                 value = str(self.value)
             return f"{alias}.{self.attribute.name} {self.operator} {value}"
+        
+    
+
 
 class AsterixAttribute:
     """Represents a column in an AsterixDB dataset."""
@@ -93,3 +100,7 @@ class AsterixAttribute:
     def is_not_null(self) -> AsterixPredicate:
         """Create an IS NOT NULL predicate."""
         return AsterixPredicate(self, "IS NOT NULL", None)
+
+    def between(self, value1: Any, value2: Any) -> AsterixPredicate:
+        """Create a BETWEEN predicate."""
+        return AsterixPredicate(self, "BETWEEN", (value1, value2))
