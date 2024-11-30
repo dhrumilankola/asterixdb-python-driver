@@ -55,6 +55,33 @@ class AsterixDataFrame:
         self.query_builder.offset(n)
         self.mock_result = self.mock_result[n:]
         return self
+    
+    def groupby(self, column: str) -> 'AsterixDataFrame':
+        """Group by a column."""
+        self.query_builder.groupby(column)
+        return self
+    
+    def aggregate(self, aggregates: Dict[str, str]) -> 'AsterixDataFrame':
+        """
+        Add aggregate functions to the query.
+        
+        Args:
+            aggregates: A dictionary where keys are column names and values are aggregate functions (e.g., {"col": "SUM"}).
+        """
+        self.query_builder.aggregate(aggregates)
+        return self
+    
+    def order_by(self, columns: Union[str, List[str]], desc: bool = False) -> 'AsterixDataFrame':
+        """
+        Add an ORDER BY clause to the query.
+
+        Args:
+            columns: A column name or a list of column names to order by.
+            desc: Whether to sort in descending order (default is False).
+        """
+        self.query_builder.order_by(columns, desc)
+        return self
+
 
     def where(self, condition: AsterixPredicate) -> 'AsterixDataFrame':
         """Keeps rows where the condition is True."""
