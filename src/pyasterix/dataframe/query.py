@@ -45,23 +45,50 @@ class AsterixQueryBuilder:
         
     def where(self, predicate: AsterixPredicate) -> 'AsterixQueryBuilder':
         """Add a WHERE clause."""
-        # Reset existing where clauses before adding new one
-        self.reset_where()
-        # Get the correct alias from joins if available
-        table_alias = self.joins[0]['alias_left'] if self.joins else self.alias
-        # Update predicate with correct alias
-        predicate.update_alias(table_alias)
+        if predicate.is_compound:
+            if predicate.left_pred:
+                self._ensure_correct_alias(predicate.left_pred)
+            if predicate.right_pred:
+                self._ensure_correct_alias(predicate.right_pred)
+        else:
+            self._ensure_correct_alias(predicate)
+        
         self.where_clauses.append(predicate)
         return self
 
+    def _ensure_correct_alias(self, predicate: AsterixPredicate) -> None:
+        """Ensure predicate has correct alias based on its dataset."""
+        if hasattr(predicate, 'parent') and predicate.parent:
+            dataset = predicate.parent.dataset
+            if 'Businesses' in dataset:
+                predicate.update_alias('b')
+            elif 'Reviews' in dataset:
+                predicate.update_alias('r')
+
+    def _update_predicate_alias(self, predicate: AsterixPredicate):
+        """Helper method to update predicate alias based on joins."""
+        if hasattr(predicate, 'parent') and predicate.parent:
+            dataset = predicate.parent.dataset
+            for join in self.joins:
+                if dataset == join['right_table']:
+                    predicate.update_alias(join['alias_right'])
+                    break
+                elif dataset == self.from_dataset:
+                    predicate.update_alias(join['alias_left'])
+                    break
+
     def _build_where_clause(self) -> str:
-        """Build the WHERE clause from predicates."""
+        """Build the WHERE clause."""
         if not self.where_clauses:
             return ""
-        table_alias = self.joins[0]['alias_left'] if self.joins else self.alias
-        return " AND ".join(
-            pred.to_sql(table_alias) for pred in self.where_clauses
-        )
+            
+        clauses = []
+        for pred in self.where_clauses:
+            correct_alias = pred.get_correct_alias()
+            clauses.append(pred.to_sql(correct_alias))
+        
+        return " AND ".join(clauses)
+
 
     def limit(self, n: int) -> 'AsterixQueryBuilder':
         """Set the LIMIT clause."""
@@ -129,32 +156,18 @@ class AsterixQueryBuilder:
         return self
 
     def _build_select_clause(self) -> str:
-        """Build enhanced SELECT clause supporting aliases and expressions."""
-        current_alias = self._get_current_alias()
-        
-        if not self.select_cols and not self.aggregates:
-            return f"SELECT VALUE {current_alias}"
-        
+        """Build the SELECT clause."""
+        if not self.select_cols:
+            return f"SELECT VALUE {self.alias}"  # Default behavior
         select_parts = []
-        
-        # Handle regular columns
         for col in self.select_cols:
             if " AS " in col:
-                select_parts.append(col)  # Column already has alias
+                select_parts.append(col)
             else:
-                select_parts.append(f"{current_alias}.{col}")
-                
-        # Handle aggregates
-        if self.aggregates and not self.select_cols:
-            for col, func in self.aggregates.items():
-                if '.' in col:
-                    field_ref = col
-                else:
-                    field_ref = f"{current_alias}.{col}"
-                alias = f"{func.lower()}_{col.replace('.', '_')}"
-                select_parts.append(f"{func}({field_ref}) AS {alias}")
-                
-        return "SELECT " + ", ".join(select_parts)
+                prefix = col.split(".")[0] if "." in col else self._get_current_alias()
+                select_parts.append(f"{prefix}.{col}")
+        return f"SELECT {', '.join(select_parts)}"
+
 
     def order_by(self, columns: Union[str, List[str], Dict[str, bool]], desc: bool = False) -> 'AsterixQueryBuilder':
         """
@@ -214,14 +227,23 @@ class AsterixQueryBuilder:
                 
         return "ORDER BY " + ", ".join(order_parts)
                 
-    def add_unnest(self, field: str, alias: str, function: Optional[str] = None):
+    def add_unnest(
+        self, 
+        field: str, 
+        alias: str, 
+        function: Optional[str] = None,
+        table_alias: Optional[str] = None
+    ) -> None:
         """Add UNNEST clause to query."""
+        if not table_alias:
+            table_alias = self.alias
+            
         if function:
-            # When using a function, use the function expression directly
+            # Function is already properly formatted with correct alias
             self.unnest_clauses.append(f"UNNEST {function} AS {alias}")
         else:
-            # For regular field unnesting, qualify with table alias
-            self.unnest_clauses.append(f"UNNEST {self.alias}.{field} AS {alias}")
+            # Use provided table alias for field reference
+            self.unnest_clauses.append(f"UNNEST {table_alias}.{field} AS {alias}")
 
     def _build_unnest_clause(self) -> str:
         """Build the UNNEST clause."""
@@ -272,12 +294,13 @@ class AsterixQueryBuilder:
             return ""
         join_clauses = []
         for join in self.joins:
+            right_table = join["right_table"].split(".")[-1]  # Remove dataverse prefix
             join_clauses.append(
-                f"JOIN {join['right_table']} {join['alias_right']} "
+                f"JOIN {right_table} {join['alias_right']} "
                 f"ON {join['alias_left']}.{join['on']} = {join['alias_right']}.{join['on']}"
             )
         return " ".join(join_clauses)
-  
+
     def build(self) -> str:
         """Build the complete SQL++ query string."""
         if not self.from_dataset:
@@ -294,13 +317,12 @@ class AsterixQueryBuilder:
 
         # Build FROM clause with JOINs if present
         # Use the join's left alias if available, otherwise use default alias
-        table_alias = self.joins[0]['alias_left'] if self.joins else self.alias
+        table_alias = self.joins[0]['alias_left'] if self.joins else 'b' if 'Businesses' in self.from_dataset else 'r'
         from_clause = f"FROM {self.from_dataset} {table_alias}"
         
         if self.joins:
             join_clauses = []
             for join in self.joins:
-                # Remove dataverse prefix from right table if present
                 right_table = join['right_table'].split('.')[-1]
                 join_clause = (
                     f"JOIN {right_table} {join['alias_right']} "
@@ -315,7 +337,7 @@ class AsterixQueryBuilder:
         if unnest_clause:
             query_parts.append(unnest_clause)
 
-        # Build WHERE clause using proper alias
+        # Build WHERE clause
         where_clause = self._build_where_clause()
         if where_clause:
             query_parts.append(f"WHERE {where_clause}")
@@ -330,18 +352,16 @@ class AsterixQueryBuilder:
         if order_by_clause:
             query_parts.append(order_by_clause)
 
-        # Build LIMIT and OFFSET
+        # Add LIMIT and OFFSET
         if self.limit_val is not None:
             query_parts.append(f"LIMIT {self.limit_val}")
         if self.offset_val is not None:
             query_parts.append(f"OFFSET {self.offset_val}")
 
-        # Join all parts with spaces and add final semicolon
         query = " ".join(query_parts)
         if not query.endswith(';'):
             query += ';'
 
-        print(f"\nGenerated Query: {query}")  # Debug print
         return query
 
 

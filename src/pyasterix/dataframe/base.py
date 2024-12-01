@@ -23,13 +23,13 @@ class AsterixDataFrame:
     def __getitem__(self, key: Union[str, List[str], AsterixPredicate]) -> Union['AsterixDataFrame', AsterixAttribute]:
         if isinstance(key, str):
             # Column access: df['column']
-            # Create AsterixAttribute with the current DataFrame's table alias
-            return AsterixAttribute(
+            attr = AsterixAttribute(
                 name=key,
-                parent=self,
-                query_builder=self.query_builder,
-                table_alias=self.alias or self.query_builder.alias
+                parent=self
             )
+            # Explicitly set the dataset from parent
+            attr.parent.dataset = self.dataset  # Add this line
+            return attr
         elif isinstance(key, list):
             # Multiple column selection: df[['col1', 'col2']]
             return self.select(key)
@@ -38,35 +38,38 @@ class AsterixDataFrame:
             return self.filter(key)
         else:
             raise TypeError(f"Invalid key type: {type(key)}")
+
             
     def select(self, columns: List[str]) -> 'AsterixDataFrame':
         """Select specific columns."""
         self.query_builder.select(columns)
         self.mock_result = [{col: f"<{col}>" for col in columns}]
         return self
-
+    
     def filter(self, predicate: AsterixPredicate) -> 'AsterixDataFrame':
         """Add a filter condition to the query."""
-        # If we have joins, we need to ensure predicates use the correct alias
-        if self.query_builder.joins:
-            for join in self.query_builder.joins:
-                # If the predicate references fields from the right table,
-                # update its alias to use the right table's alias
-                if (hasattr(predicate.attribute, 'parent') and 
-                    predicate.attribute.parent.dataset == join['right_table']):
-                    predicate.update_alias(join['alias_right'])
-                # If the predicate references fields from the left table,
-                # update its alias to use the left table's alias
-                elif (hasattr(predicate.attribute, 'parent') and 
-                    predicate.attribute.parent.dataset == self.dataset):
-                    predicate.update_alias(join['alias_left'])
-
         # Handle compound predicates recursively
         if predicate.is_compound:
             if predicate.left_pred:
                 self.filter(predicate.left_pred)
             if predicate.right_pred:
                 self.filter(predicate.right_pred)
+            return self
+
+        # Set correct alias based on dataset
+        if predicate.attribute:
+            if predicate.attribute.parent.dataset == 'Businesses':
+                predicate.update_alias('b')
+            elif predicate.attribute.parent.dataset == 'Reviews':
+                predicate.update_alias('r')
+            else:
+                # For other datasets, use join aliases if available
+                if self.query_builder.joins:
+                    for join in self.query_builder.joins:
+                        if predicate.attribute.parent.dataset == join['right_table']:
+                            predicate.update_alias(join['alias_right'])
+                        elif predicate.attribute.parent.dataset == self.dataset:
+                            predicate.update_alias(join['alias_left'])
 
         self.query_builder.where(predicate)
         return self
@@ -193,16 +196,21 @@ class AsterixDataFrame:
             field: The field/array to unnest
             alias: Alias for the unnested values
             function: Optional function to apply before unnesting (e.g., split)
-                
-        Returns:
-            AsterixDataFrame with unnest operation added to query
         """
         # Validate field name and alias
         self._validate_field_name(field)
         self._validate_alias(alias)
         
+        # Get correct table alias
+        table_alias = 'b' if 'Businesses' in self.dataset else 'r'
+        
+        # If function is provided, replace any instance of default alias 't'
+        # with the correct table alias
+        if function:
+            function = function.replace('t.', f'{table_alias}.')
+            
         # Add unnest clause to query builder
-        self.query_builder.add_unnest(field, alias, function)
+        self.query_builder.add_unnest(field, alias, function, table_alias)
         return self
 
     def where(self, condition: AsterixPredicate) -> 'AsterixDataFrame':

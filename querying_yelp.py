@@ -1,5 +1,6 @@
 from src.pyasterix._http_client import AsterixDBHttpClient
 from src.pyasterix.dataframe import AsterixDataFrame
+import pandas as pd
 import time
 
 # Initialize the client
@@ -49,9 +50,9 @@ def query_3_2():
 
     # Measure query execution time
     result = measure_time(df_grouped.execute)
-    print(result)
-
-
+    print("AsterixDB result: \n", result)
+    
+    
 # Query 3.3: Average review scores for top 10 cities
 def query_3_3():
     print("\nQuery 3.3: Average review scores for top 10 cities")
@@ -84,15 +85,16 @@ def query_3_4():
     df_businesses = AsterixDataFrame(client, "YelpDataverse.Businesses")
     df_categories = (
         df_businesses
-        .unnest("categories", "c", "split(t.categories, ',')")
-        .select(["c AS category", "AVG(t.stars) AS avg_review_score"])
-        .groupby("c")  # Use the UNNEST alias 'c' instead of the SELECT alias 'category'
+        .unnest("categories", "c", "split(b.categories, ',')")  # Correct alias 'b'
+        .select(["c AS category", "AVG(b.stars) AS avg_review_score"])  # Consistent aliasing
+        .groupby("c")  # Use the UNNEST alias 'c'
         .order_by("avg_review_score", desc=True)
     )
 
     # Measure query execution time
     result = measure_time(df_categories.execute)
     print(result)
+
 
 
 # Query 3.5: Restaurants in Philadelphia with the highest ratings and most customer engagement
@@ -209,23 +211,24 @@ def query_3_9():
 
     # AsterixDataFrame query
     df_reviews = AsterixDataFrame(client, "YelpDataverse.Reviews")
+    df_businesses = AsterixDataFrame(client, "YelpDataverse.Businesses")
     df_influential_users = (
         df_reviews
         .join(
-            right_table="YelpDataverse.Businesses",
+            df_businesses,
             on="business_id",
             alias_left="r",
             alias_right="b"
         )
         .filter(
-            df_reviews["b.city"] == "Tampa"
+            (df_businesses["city"] == "Tampa")  # Correct alias usage for filtering
         )
         .select([
-            "r.user_id AS user_id",
-            "SUM(r.useful) AS useful_votes"
+            "r.user_id AS user_id",           # Correct alias usage in SELECT
+            "SUM(r.useful) AS useful_votes"  # Correct aggregate alias
         ])
-        .groupby("r.user_id")
-        .order_by("useful_votes", desc=True)
+        .groupby("user_id")  # Use alias defined in SELECT for GROUP BY
+        .order_by("useful_votes", desc=True)  # Use aggregate alias for ORDER BY
         .limit(10)
     )
     
@@ -240,20 +243,21 @@ def query_3_10():
 
     # AsterixDataFrame query
     df_reviews = AsterixDataFrame(client, "YelpDataverse.Reviews")
+    df_businesses = AsterixDataFrame(client, "YelpDataverse.Businesses")
     df_review_length = (
         df_reviews
         .join(
-            right_table="YelpDataverse.Businesses",
+            df_businesses,
             on="business_id",
             alias_left="r",
             alias_right="b"
         )
         .select([
-            "r.stars AS stars",
-            "AVG(LENGTH(r.text)) AS avg_review_length"
+            "r.stars AS stars",                    # Correct alias for stars
+            "AVG(LENGTH(r.text)) AS avg_review_length"  # Correct aggregation
         ])
-        .groupby("r.stars")
-        .order_by("r.stars", desc=True)
+        .groupby("stars")  # Group by the alias defined in SELECT
+        .order_by("stars", desc=True)  # Order by alias
     )
     
     # Measure query execution time
@@ -261,18 +265,99 @@ def query_3_10():
     print(result)
 
 
+# Query 3.11: Bars in Tucson
+def query_3_11():
+    """Test: Bars in Tucson with most tips and their star ratings."""
+
+    # Setup: Create AsterixDataFrame objects for Businesses and Tips
+    df_businesses = AsterixDataFrame(client, "YelpDataverse.Businesses")
+    df_tips = AsterixDataFrame(client, "YelpDataverse.Tips")
+
+    # Query construction
+    df_bars_tips = (
+        df_businesses
+        .join(
+            df_tips,
+            on="business_id",
+            alias_left="b",
+            alias_right="t"
+        )
+        .filter(
+            (df_businesses["city"] == "Tucson") & 
+            df_businesses["categories"].contains("Bars")
+        )
+        .select([
+            "b.name AS name",  # Bar name
+            "COUNT(t.tip_id) AS tips_count",  # Number of tips
+            "b.stars AS rating"  # Star ratings
+        ])
+        .groupby(["name", "rating"])  # Group by the column aliases
+        .order_by("tips_count", desc=True)  # Order by tips count in descending order
+    )
+
+    # Execution and validation
+    result = df_bars_tips.execute()
+    print(result)
+
+
+def query_3_12():
+    """Test: Most reviewed businesses and top 10 common words in their reviews."""
+
+    # Part 1: Find the top 3 businesses with the most reviews
+    df_businesses = AsterixDataFrame(client, "YelpDataverse.Businesses")
+    df_most_reviewed = (
+        df_businesses
+        .select([
+            "business_id AS business_id",  # No alias prefix for columns directly referenced
+            "name AS name",
+            "review_count AS review_count"
+        ])
+        .order_by("review_count", desc=True)  # Use alias directly
+        .limit(3)
+    )
+    result_most_reviewed = df_most_reviewed.execute()
+    print("Top 3 Most Reviewed Businesses:", result_most_reviewed)
+    
+    # Get the business ID of the most-reviewed business (offset 0 for the first record)
+    most_reviewed_business_id = result_most_reviewed.head(1)[0]["business_id"]
+
+    # Part 2: Find the top 10 common words in reviews for the most-reviewed business
+    df_reviews = AsterixDataFrame(client, "YelpDataverse.Reviews")
+    df_common_words = (
+        df_reviews
+        .unnest(
+            field="text",
+            alias="w",
+            function="split(r.text, ' ')"  # Ensure alias consistency
+        )
+        .filter(df_reviews["business_id"] == most_reviewed_business_id)
+        .select([
+            "w AS word",  # Word alias
+            "COUNT(w) AS word_count"  # Word count
+        ])
+        .groupby("word")  # Group by alias directly
+        .order_by("word_count", desc=True)  # Sort by word count
+        .limit(10)
+    )
+    result_common_words = df_common_words.execute()
+    print("Top 10 Common Words:", result_common_words)
+
+
+
+
 
 
 # Execute all queries
 # query_3_1()
 query_3_2()
-query_3_3()
-query_3_4()
-query_3_5()
-query_3_6()
-query_3_7()
-query_3_8()
-query_3_9()
-query_3_10()
-
+# query_3_3()
+# query_3_4()
+# query_3_5()
+# query_3_6()
+# query_3_7()
+# query_3_8()
+# query_3_9()
+# query_3_10()
+# query_3_11()
+# query_3_12()
 
