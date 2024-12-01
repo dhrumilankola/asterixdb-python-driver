@@ -12,10 +12,14 @@ class AsterixPredicate:
     left_pred: Optional['AsterixPredicate'] = None
     right_pred: Optional['AsterixPredicate'] = None
     
+    def __post_init__(self):
+        # Propagate parent from attribute to predicate
+        self.parent = self.attribute.parent if self.attribute else None
+
     def __and__(self, other: 'AsterixPredicate') -> 'AsterixPredicate':
         """Support for AND operations between predicates."""
         return AsterixPredicate(
-            attribute=self.attribute,
+            attribute=None,  # Compound predicates don't directly reference an attribute
             operator="AND",
             value=None,
             is_compound=True,
@@ -26,14 +30,24 @@ class AsterixPredicate:
     def __or__(self, other: 'AsterixPredicate') -> 'AsterixPredicate':
         """Support for OR operations between predicates."""
         return AsterixPredicate(
-            attribute=self.attribute,
+            attribute=None,  # Compound predicates don't directly reference an attribute
             operator="OR",
             value=None,
             is_compound=True,
             left_pred=self,
             right_pred=other
         )
-        
+
+    def update_alias(self, new_alias: str):
+        """Update the alias used in the predicate."""
+        if hasattr(self, 'parent') and self.parent:
+            self.parent.query_builder.alias = new_alias
+        if self.is_compound:
+            if self.left_pred:
+                self.left_pred.update_alias(new_alias)
+            if self.right_pred:
+                self.right_pred.update_alias(new_alias)
+    
     def to_sql(self, alias: str) -> str:
         """Convert predicate to SQL string."""
         if self.is_compound:
@@ -41,25 +55,36 @@ class AsterixPredicate:
             left = self.left_pred.to_sql(alias)
             right = self.right_pred.to_sql(alias)
             return f"({left} {self.operator} {right})"
-        elif self.operator == "BETWEEN":
-            # Special case for BETWEEN: value is a tuple (value1, value2)
-            value1, value2 = self.value
-            return f"{alias}.{self.attribute.name} BETWEEN {value1} AND {value2}"
-        elif self.operator in ("IS NULL", "IS NOT NULL"):
-            return f"{alias}.{self.attribute.name} {self.operator}"
+        elif self.operator == "CONTAINS":
+            # Use the correct alias based on which table the field belongs to
+            correct_alias = alias
+            if hasattr(self, 'parent') and self.parent:
+                for join in self.parent.query_builder.joins:
+                    if self.parent.dataset == join['right_table']:
+                        correct_alias = join['alias_right']
+                        break
+            field_ref = f"{correct_alias}.{self.attribute.name}"
+            return f"CONTAINS({field_ref}, '{self.value}')"
         else:
-            # Handle basic predicates
+            # For other operators, also ensure we use the correct alias
+            correct_alias = alias
+            if hasattr(self, 'parent') and self.parent:
+                for join in self.parent.query_builder.joins:
+                    if self.parent.dataset == join['right_table']:
+                        correct_alias = join['alias_right']
+                        break
+            field_ref = f"{correct_alias}.{self.attribute.name}"
+            
             if isinstance(self.value, (str, datetime, date)):
                 value = f"'{self.value}'"
             elif isinstance(self.value, (list, tuple)):
                 value = f"({', '.join(repr(v) for v in self.value)})"
             else:
                 value = str(self.value)
-            return f"{alias}.{self.attribute.name} {self.operator} {value}"
+                
+            return f"{field_ref} {self.operator} {value}"
+
         
-    
-
-
 class AsterixAttribute:
     """Represents a column in an AsterixDB dataset."""
     
@@ -68,7 +93,12 @@ class AsterixAttribute:
         self.parent = parent
         
     def __eq__(self, other: Any) -> AsterixPredicate:
-        return AsterixPredicate(self, "=", other)
+        return AsterixPredicate(
+            attribute=self,
+            operator="=",
+            value=other,
+            table_alias=self.table_alias  # Pass table alias
+        )
         
     def __gt__(self, other: Any) -> AsterixPredicate:
         return AsterixPredicate(self, ">", other)
@@ -104,3 +134,16 @@ class AsterixAttribute:
     def between(self, value1: Any, value2: Any) -> AsterixPredicate:
         """Create a BETWEEN predicate."""
         return AsterixPredicate(self, "BETWEEN", (value1, value2))
+    
+    def contains(self, value: str) -> AsterixPredicate:
+        """Create a CONTAINS predicate."""
+        return AsterixPredicate(
+            attribute=self,
+            operator="CONTAINS",
+            value=value,
+            table_alias=self.table_alias  # Pass table alias
+        )
+    
+    def split(self, delimiter: str) -> 'AsterixAttribute':
+        """Split string field by delimiter."""
+        return AsterixAttribute(f"split({self.name}, '{delimiter}')", self.parent)

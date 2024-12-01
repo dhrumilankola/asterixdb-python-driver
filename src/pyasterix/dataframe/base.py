@@ -1,6 +1,7 @@
-from typing import Union, List, Any, Dict
+from typing import Union, List, Any, Dict, Tuple, Optional
 import pandas as pd
 from src.pyasterix._http_client import AsterixDBHttpClient
+from src.pyasterix.exceptions import ValidationError
 from .attribute import AsterixAttribute, AsterixPredicate
 from .query import AsterixQueryBuilder
 
@@ -22,7 +23,13 @@ class AsterixDataFrame:
     def __getitem__(self, key: Union[str, List[str], AsterixPredicate]) -> Union['AsterixDataFrame', AsterixAttribute]:
         if isinstance(key, str):
             # Column access: df['column']
-            return AsterixAttribute(key, self)
+            # Create AsterixAttribute with the current DataFrame's table alias
+            return AsterixAttribute(
+                name=key,
+                parent=self,
+                query_builder=self.query_builder,
+                table_alias=self.alias or self.query_builder.alias
+            )
         elif isinstance(key, list):
             # Multiple column selection: df[['col1', 'col2']]
             return self.select(key)
@@ -39,9 +46,29 @@ class AsterixDataFrame:
         return self
 
     def filter(self, predicate: AsterixPredicate) -> 'AsterixDataFrame':
-        """Filter rows based on predicate."""
+        """Add a filter condition to the query."""
+        # If we have joins, we need to ensure predicates use the correct alias
+        if self.query_builder.joins:
+            for join in self.query_builder.joins:
+                # If the predicate references fields from the right table,
+                # update its alias to use the right table's alias
+                if (hasattr(predicate.attribute, 'parent') and 
+                    predicate.attribute.parent.dataset == join['right_table']):
+                    predicate.update_alias(join['alias_right'])
+                # If the predicate references fields from the left table,
+                # update its alias to use the left table's alias
+                elif (hasattr(predicate.attribute, 'parent') and 
+                    predicate.attribute.parent.dataset == self.dataset):
+                    predicate.update_alias(join['alias_left'])
+
+        # Handle compound predicates recursively
+        if predicate.is_compound:
+            if predicate.left_pred:
+                self.filter(predicate.left_pred)
+            if predicate.right_pred:
+                self.filter(predicate.right_pred)
+
         self.query_builder.where(predicate)
-        self.mock_result = [{**row} for row in self.mock_result]
         return self
 
     def limit(self, n: int) -> 'AsterixDataFrame':
@@ -61,31 +88,155 @@ class AsterixDataFrame:
         self.query_builder.groupby(column)
         return self
     
-    def aggregate(self, aggregates: Dict[str, str]) -> 'AsterixDataFrame':
+    def aggregate(
+        self,
+        aggregates: Dict[str, str],
+        group_by: Optional[Union[str, List[str]]] = None
+    ) -> 'AsterixDataFrame':
         """
         Add aggregate functions to the query.
         
         Args:
-            aggregates: A dictionary where keys are column names and values are aggregate functions (e.g., {"col": "SUM"}).
+            aggregates: Dictionary mapping field names to aggregate functions 
+                    e.g., {"stars": "AVG", "review_count": "SUM"}
+            group_by: Optional field or list of fields to group by
+                
+        Returns:
+            AsterixDataFrame with aggregation added to query
         """
+        # Validate aggregate functions
+        valid_aggs = {"AVG", "SUM", "COUNT", "MIN", "MAX", "ARRAY_AGG"}
+        for col, func in aggregates.items():
+            if func.upper() not in valid_aggs:
+                raise ValidationError(f"Invalid aggregate function: {func}")
+            self._validate_field_name(col)
+
+        # Handle group by fields
+        if group_by:
+            if isinstance(group_by, str):
+                self._validate_field_name(group_by)
+                self.query_builder.groupby(group_by)
+            elif isinstance(group_by, list):
+                for field in group_by:
+                    self._validate_field_name(field)
+                self.query_builder.groupby(group_by)
+            else:
+                raise ValidationError("group_by must be string or list of strings")
+
+        # Add aggregates to query builder
         self.query_builder.aggregate(aggregates)
         return self
     
-    def order_by(self, columns: Union[str, List[str]], desc: bool = False) -> 'AsterixDataFrame':
+    def order_by(
+        self, 
+        columns: Union[str, List[str]], 
+        desc: bool = False
+    ) -> 'AsterixDataFrame':
         """
-        Add an ORDER BY clause to the query.
-
+        Add ORDER BY clause to query.
+        
         Args:
-            columns: A column name or a list of column names to order by.
-            desc: Whether to sort in descending order (default is False).
+            columns: Column(s) to sort by. Can be single column name or list of columns.
+            desc: True for descending order, False for ascending
+            
+        Returns:
+            Updated AsterixDataFrame
         """
+        # Validate column names
+        if isinstance(columns, str):
+            columns = [columns]
+            
+        for col in columns:
+            if " AS " in col:
+                # For columns with aliases, validate the base column
+                base_col = col.split(" AS ")[0].strip()
+                if "." not in base_col:  # Not already qualified
+                    self._validate_field_name(base_col)
+            else:
+                self._validate_field_name(col)
+                
         self.query_builder.order_by(columns, desc)
         return self
 
+    def _is_valid_identifier(self, name: str) -> bool:
+        """Check if a name is a valid AsterixDB identifier."""
+        if not name or not isinstance(name, str):
+            return False
+        # Basic validation: starts with letter, contains only alphanumeric and underscore
+        return name[0].isalpha() and all(c.isalnum() or c == '_' for c in name)
+
+    def _validate_field_name(self, field: str) -> None:
+        """Validate field name format."""
+        if not field or not isinstance(field, str):
+            raise ValidationError("Field name must be a non-empty string")
+        
+        # Split into parts (for nested fields)
+        parts = field.split('.')
+        if not all(self._is_valid_identifier(part) for part in parts):
+            raise ValidationError(f"Invalid field name: {field}")
+
+    def _validate_alias(self, alias: str) -> None:
+        """Validate alias format."""
+        if not self._is_valid_identifier(alias):
+            raise ValidationError(f"Invalid alias: {alias}")
+
+    def unnest(
+        self,
+        field: str,
+        alias: str,
+        function: Optional[str] = None
+    ) -> 'AsterixDataFrame':
+        """
+        Unnest an array or apply a splitting function and unnest the results.
+        
+        Args:
+            field: The field/array to unnest
+            alias: Alias for the unnested values
+            function: Optional function to apply before unnesting (e.g., split)
+                
+        Returns:
+            AsterixDataFrame with unnest operation added to query
+        """
+        # Validate field name and alias
+        self._validate_field_name(field)
+        self._validate_alias(alias)
+        
+        # Add unnest clause to query builder
+        self.query_builder.add_unnest(field, alias, function)
+        return self
 
     def where(self, condition: AsterixPredicate) -> 'AsterixDataFrame':
         """Keeps rows where the condition is True."""
         return self.filter(condition)
+
+
+    def join(
+        self,
+        other: 'AsterixDataFrame',
+        on: str,
+        alias_left: str,
+        alias_right: str
+    ) -> 'AsterixDataFrame':
+        """
+        Join another dataset.
+
+        Args:
+            other: The other AsterixDataFrame to join.
+            on: The column to join on.
+            alias_left: Alias for the left dataset.
+            alias_right: Alias for the right dataset.
+        """
+        if not isinstance(other, AsterixDataFrame):
+            raise ValueError("Can only join with another AsterixDataFrame")
+        self.query_builder.add_join(
+            right_table=other.dataset,
+            on=on,
+            alias_left=alias_left,
+            alias_right=alias_right
+        )
+        return self
+
+
 
     def mask(self, condition: AsterixPredicate) -> 'AsterixDataFrame':
         """Keeps rows where the condition is False."""

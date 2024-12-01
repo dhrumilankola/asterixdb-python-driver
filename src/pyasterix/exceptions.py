@@ -1,16 +1,23 @@
-# exceptions.py
-class Error(Exception):
-    """Base class for all database exceptions."""
+class AsterixError(Exception):
+    """Base exception class for AsterixDB client errors."""
     pass
 
-class DatabaseError(Error):
-    """Exception raised for errors related to the database."""
+class ConnectionError(AsterixError):
+    """Raised when connection fails."""
     pass
 
-class InterfaceError(Error):
-    """Exception raised for errors related to the database interface."""
+class QueryError(AsterixError):
+    """Raised when query execution fails."""
     pass
 
-class NotSupportedError(DatabaseError):
-    """Exception raised for unsupported operations."""
+class ValidationError(AsterixError):
+    """Raised when input validation fails."""
+    pass
+
+class TypeMappingError(AsterixError):
+    """Raised when type mapping between Python and AsterixDB fails."""
+    pass
+
+class QueryBuildError(AsterixError):
+    """Raised when query building fails."""
     pass
