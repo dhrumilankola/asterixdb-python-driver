@@ -1,7 +1,8 @@
 from typing import Union, List, Any, Dict, Tuple, Optional
 import pandas as pd
 from src.pyasterix._http_client import AsterixDBHttpClient
-from src.pyasterix.exceptions import ValidationError
+from ..connection import Connection
+from src.pyasterix.exceptions import *
 from .attribute import AsterixAttribute, AsterixPredicate
 from .query import AsterixQueryBuilder
 
@@ -9,16 +10,24 @@ from .query import AsterixQueryBuilder
 class AsterixDataFrame:
     """DataFrame-like interface for AsterixDB datasets."""
 
-    def __init__(self, client: AsterixDBHttpClient, dataset: str):
-        if not isinstance(client, AsterixDBHttpClient):
-            raise TypeError("client must be an instance of AsterixDBHttpClient")
+    def __init__(self, connection: Connection, dataset: str):
+        """
+        Initialize AsterixDataFrame.
+        
+        Args:
+            connection: AsterixDB connection instance
+            dataset: Name of the dataset to query
+        """
+        if not isinstance(connection, Connection):
+            raise ValidationError("connection must be an instance of Connection")
             
-        self.client = client
+        self.connection = connection
+        self.cursor = connection.cursor()
         self.dataset = dataset
         self.query_builder = AsterixQueryBuilder()
         self.query_builder.from_table(dataset)
-        self.result_set = None  # Stores results after query execution
-        self.mock_result = []  # Mock results for inspection
+        self.result_set = None
+        self.mock_result = []
 
     def __getitem__(self, key: Union[str, List[str], AsterixPredicate]) -> Union['AsterixDataFrame', AsterixAttribute]:
         if isinstance(key, str):
@@ -98,37 +107,29 @@ class AsterixDataFrame:
     ) -> 'AsterixDataFrame':
         """
         Add aggregate functions to the query.
-        
         Args:
-            aggregates: Dictionary mapping field names to aggregate functions 
-                    e.g., {"stars": "AVG", "review_count": "SUM"}
+            aggregates: Dictionary mapping field names to aggregate functions
             group_by: Optional field or list of fields to group by
-                
         Returns:
-            AsterixDataFrame with aggregation added to query
+            Updated AsterixDataFrame with aggregation logic
         """
         # Validate aggregate functions
         valid_aggs = {"AVG", "SUM", "COUNT", "MIN", "MAX", "ARRAY_AGG"}
         for col, func in aggregates.items():
             if func.upper() not in valid_aggs:
                 raise ValidationError(f"Invalid aggregate function: {func}")
-            self._validate_field_name(col)
+            self.query_builder.aggregate({col: func.upper()})
 
         # Handle group by fields
         if group_by:
             if isinstance(group_by, str):
-                self._validate_field_name(group_by)
-                self.query_builder.groupby(group_by)
+                self.query_builder.groupby([group_by])
             elif isinstance(group_by, list):
-                for field in group_by:
-                    self._validate_field_name(field)
                 self.query_builder.groupby(group_by)
-            else:
-                raise ValidationError("group_by must be string or list of strings")
 
-        # Add aggregates to query builder
-        self.query_builder.aggregate(aggregates)
         return self
+
+
     
     def order_by(
         self, 
@@ -244,8 +245,6 @@ class AsterixDataFrame:
         )
         return self
 
-
-
     def mask(self, condition: AsterixPredicate) -> 'AsterixDataFrame':
         """Keeps rows where the condition is False."""
         negated_condition = AsterixPredicate(
@@ -275,20 +274,28 @@ class AsterixDataFrame:
         return self.select(selected_cols)
 
     def execute(self) -> 'AsterixDataFrame':
-        """Execute the query and return a new AsterixDataFrame."""
+        """Execute the built query and return a new AsterixDataFrame."""
         query = self.query_builder.build()
         print(f"\nExecuting Query: {query}")  # Debug print
         
         try:
-            result = self.client.execute_query(statement=query)
-            if isinstance(result, dict) and result.get('status') == 'success':
-                new_df = AsterixDataFrame(self.client, self.dataset)
-                new_df.result_set = result.get('results', [])
-                return new_df
-            else:
-                raise RuntimeError(f"Query failed: {result.get('error', 'Unknown error')}")
+            self.cursor.execute(query)
+            
+            # Convert results to proper format
+            results = self.cursor.fetchall()
+            
+            # Create new DataFrame with results
+            new_df = AsterixDataFrame(self.connection, self.dataset)
+            new_df.result_set = results
+            
+            # If results exist but are empty, ensure proper structure
+            if not results:
+                new_df.result_set = []
+                
+            return new_df
+            
         except Exception as e:
-            raise RuntimeError(f"Failed to execute query: {str(e)}")
+            raise QueryError(f"Failed to execute query: {str(e)}")
 
     def __repr__(self) -> str:
         """Return a string representation of the DataFrame."""
@@ -318,3 +325,16 @@ class AsterixDataFrame:
         if self.result_set is None:
             raise RuntimeError("No results available. Execute the query first.")
         return pd.DataFrame(self.result_set)
+
+    def close(self):
+        """Close the cursor."""
+        if self.cursor:
+            self.cursor.close()
+
+    def __enter__(self):
+        """Support context manager protocol."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Clean up resources when exiting context."""
+        self.close()

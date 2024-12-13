@@ -88,6 +88,8 @@ class AsterixPredicate:
         
         if self.operator == "CONTAINS":
             return f"CONTAINS({field_ref}, '{self.value}')"
+        elif self.operator in {"SUM", "AVG", "COUNT", "MIN", "MAX"}:
+            return f"{self.operator}({field_ref})"
         else:
             if isinstance(self.value, (str, datetime, date)):
                 value = f"'{self.value}'"
@@ -96,6 +98,7 @@ class AsterixPredicate:
             else:
                 value = str(self.value)
             return f"{field_ref} {self.operator} {value}"
+
 
 
         

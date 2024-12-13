@@ -22,6 +22,40 @@ class AsterixQueryBuilder:
         self.current_dataverse: Optional[str] = None
         self.current_alias = None
 
+    def _validate_field_name(self, field: str) -> None:
+        """
+        Validate the format of a field name to ensure it adheres to valid SQL++ syntax.
+
+        Args:
+            field (str): The field name to validate.
+
+        Raises:
+            ValidationError: If the field name is invalid.
+        """
+        if not field or not isinstance(field, str):
+            raise ValidationError("Field name must be a non-empty string")
+        
+        # Split into parts (e.g., for nested fields)
+        parts = field.split('.')
+        for part in parts:
+            if not self._is_valid_identifier(part):
+                raise ValidationError(f"Invalid field name: {field}")
+
+    def _is_valid_identifier(self, name: str) -> bool:
+        """
+        Check if a name is a valid SQL++ identifier.
+
+        Args:
+            name (str): The name to validate.
+
+        Returns:
+            bool: True if the name is valid, False otherwise.
+        """
+        if not name or not isinstance(name, str):
+            return False
+        # Basic validation: starts with a letter, contains only alphanumeric and underscores
+        return name[0].isalpha() and all(c.isalnum() or c == '_' for c in name)
+
     def _get_current_alias(self) -> str:
         """Get the current table alias to use."""
         return self.current_alias or self.alias
@@ -81,14 +115,13 @@ class AsterixQueryBuilder:
         """Build the WHERE clause."""
         if not self.where_clauses:
             return ""
-            
+        
         clauses = []
         for pred in self.where_clauses:
-            correct_alias = pred.get_correct_alias()
-            clauses.append(pred.to_sql(correct_alias))
+            conditions = pred.to_sql(self.alias)
+            clauses.append(conditions)
         
         return " AND ".join(clauses)
-
 
     def limit(self, n: int) -> 'AsterixQueryBuilder':
         """Set the LIMIT clause."""
@@ -112,61 +145,57 @@ class AsterixQueryBuilder:
         """Build the GROUP BY clause."""
         if not self.group_by_columns:
             return ""
-            
-        current_alias = self._get_current_alias()    
-        group_cols = []
         
+        group_cols = []
         for col in self.group_by_columns:
-            # If the column is a complete expression, use it as-is
-            if '(' in col or ' AS ' in col:
-                group_cols.append(col.split(' AS ')[0].strip())
-                continue
-                
-            # Check for aliases from SELECT or UNNEST
-            select_aliases = {
-                sel.split(' AS ')[-1].strip(): sel.split(' AS ')[0].strip()
-                for sel in self.select_cols if ' AS ' in sel
-            }
-            
-            unnest_aliases = {
-                unnest.split(' AS ')[-1].strip(): unnest.split(' AS ')[0].strip()
-                for unnest in self.unnest_clauses
-            }
-            
-            if col in select_aliases:
-                group_cols.append(select_aliases[col])
-            elif col in unnest_aliases:
-                group_cols.append(col)  # Use unnest alias directly
+            if "(" in col or " AS " in col:  # If column is an alias or expression
+                group_cols.append(col.split(" AS ")[0].strip())
             else:
-                group_cols.append(f"{current_alias}.{col}")
-                
+                group_cols.append(f"{self.alias}.{col}")
+        
         return f"GROUP BY {', '.join(group_cols)}"
+
 
     def aggregate(self, aggregates: Dict[str, str]) -> 'AsterixQueryBuilder':
         """
         Add aggregate functions to the query.
-        
         Args:
             aggregates: Dictionary mapping field names to aggregate functions
         """
-        self.aggregates = {
-            col: func.upper() 
-            for col, func in aggregates.items()
-        }
+        valid_aggs = {"AVG", "SUM", "COUNT", "MIN", "MAX", "ARRAY_AGG"}
+        for col, func in aggregates.items():
+            if func.upper() not in valid_aggs:
+                raise ValidationError(f"Invalid aggregate function: {func}")
+            self._validate_field_name(col)
+            self.aggregates[col] = func.upper()
+        
         return self
 
+
     def _build_select_clause(self) -> str:
-        """Build the SELECT clause."""
-        if not self.select_cols:
-            return f"SELECT VALUE {self.alias}"  # Default behavior
+        """Build the SELECT clause with proper aliasing for aggregates."""
         select_parts = []
+
+        # Handle regular columns
         for col in self.select_cols:
-            if " AS " in col:
+            if " AS " in col:  # Column with alias
                 select_parts.append(col)
-            else:
+            else:  # Prefix column with current alias
                 prefix = col.split(".")[0] if "." in col else self._get_current_alias()
                 select_parts.append(f"{prefix}.{col}")
+        
+        # Handle aggregates
+        for col, func in self.aggregates.items():
+            # Ensure proper aliasing and formatting
+            aggregate_expr = f"{func}({self.alias}.{col}) AS {col}_{func.lower()}"
+            select_parts.append(aggregate_expr)
+        
+        # Ensure at least one column is selected
+        if not select_parts:
+            return f"SELECT VALUE {self.alias}"
+
         return f"SELECT {', '.join(select_parts)}"
+
 
 
     def order_by(self, columns: Union[str, List[str], Dict[str, bool]], desc: bool = False) -> 'AsterixQueryBuilder':
@@ -302,67 +331,44 @@ class AsterixQueryBuilder:
         return " ".join(join_clauses)
 
     def build(self) -> str:
-        """Build the complete SQL++ query string."""
-        if not self.from_dataset:
-            raise ValueError("No dataset specified")
-
-        query_parts = []
-
+        """Build complete SQL++ query."""
+        parts = []
+        
         # Add USE statement if dataverse is specified
         if self.current_dataverse:
-            query_parts.append(f"USE {self.current_dataverse};")
-
-        # Build SELECT clause
-        query_parts.append(self._build_select_clause())
-
-        # Build FROM clause with JOINs if present
-        # Use the join's left alias if available, otherwise use default alias
-        table_alias = self.joins[0]['alias_left'] if self.joins else 'b' if 'Businesses' in self.from_dataset else 'r'
-        from_clause = f"FROM {self.from_dataset} {table_alias}"
+            parts.append(f"USE {self.current_dataverse};")
         
+        # Build SELECT clause
+        parts.append(self._build_select_clause())
+        
+        # Build FROM clause with consistent alias
+        parts.append(f"FROM {self.from_dataset} {self.alias}")
+        
+        # Add JOIN clauses
         if self.joins:
-            join_clauses = []
-            for join in self.joins:
-                right_table = join['right_table'].split('.')[-1]
-                join_clause = (
-                    f"JOIN {right_table} {join['alias_right']} "
-                    f"ON {join['alias_left']}.{join['on']} = {join['alias_right']}.{join['on']}"
-                )
-                join_clauses.append(join_clause)
-            from_clause += " " + " ".join(join_clauses)
-        query_parts.append(from_clause)
-
-        # Add UNNEST clauses after FROM
-        unnest_clause = self._build_unnest_clause()
-        if unnest_clause:
-            query_parts.append(unnest_clause)
-
-        # Build WHERE clause
+            parts.append(self._build_join_clause())
+        
+        # Add WHERE clause if present
         where_clause = self._build_where_clause()
         if where_clause:
-            query_parts.append(f"WHERE {where_clause}")
-
-        # Build GROUP BY clause
-        group_by_clause = self._build_group_by_clause()
-        if group_by_clause:
-            query_parts.append(group_by_clause)
-
-        # Build ORDER BY clause
-        order_by_clause = self._build_order_by_clause()
-        if order_by_clause:
-            query_parts.append(order_by_clause)
-
-        # Add LIMIT and OFFSET
+            parts.append(f"WHERE {where_clause}")
+        
+        # Add GROUP BY clause
+        if self.group_by_columns:
+            parts.append(self._build_group_by_clause())
+        
+        # Add ORDER BY clause
+        if self.order_by_columns:
+            parts.append(self._build_order_by_clause())
+        
+        # Add LIMIT and OFFSET clauses
         if self.limit_val is not None:
-            query_parts.append(f"LIMIT {self.limit_val}")
+            parts.append(f"LIMIT {self.limit_val}")
         if self.offset_val is not None:
-            query_parts.append(f"OFFSET {self.offset_val}")
+            parts.append(f"OFFSET {self.offset_val}")
+        
+        return " ".join(parts) + ";"
 
-        query = " ".join(query_parts)
-        if not query.endswith(';'):
-            query += ';'
-
-        return query
 
 
 
