@@ -1,60 +1,126 @@
 from src.pyasterix._http_client import AsterixDBHttpClient
-from src.pyasterix.dataframe import AsterixDataFrame as ad
+from src.pyasterix.connection import Connection
+from src.pyasterix.dataframe import AsterixDataFrame
 
-# Initialize the client and DataFrame
-client = AsterixDBHttpClient()
-df = ad(client, "test.Customers")
+def setup_test_data():
+    """Set up the test data."""
+    client = AsterixDBHttpClient()
+    try:
+        print("\nSetting up the test dataverse and dataset...")
+        client.execute_query("""
+            DROP DATAVERSE test IF EXISTS;
+            CREATE DATAVERSE test;
+            USE test;
 
-# Test 1: Filter using where()
-df_stl = df.where(df['address.city'] == "St. Louis, MO")
-print("\nAfter filtering by city using where():")
-print(df_stl.head())
+            CREATE TYPE CustomerType AS {
+                custid: string,
+                name: string,
+                age: int32,
+                address: {
+                    street: string,
+                    city: string,
+                    zipcode: string?
+                },
+                rating: int32?
+            };
 
-# Test 2: Select specific columns
-df_stl = df_stl[['name', 'rating']]
-print("\nAfter selecting columns using select:")
-print(df_stl.head())
+            CREATE DATASET Customers(CustomerType)
+                PRIMARY KEY custid;
 
-# Test 3: Filter using mask()
-df_masked = df.mask(df['rating'] > 600)
-print("\nAfter masking rows where rating > 600:")
-print(df_masked.head())
+            INSERT INTO Customers([
+                {
+                    "custid": "C1",
+                    "name": "Alice",
+                    "age": 30,
+                    "address": {
+                        "street": "123 Main St",
+                        "city": "St. Louis, MO",
+                        "zipcode": "63101"
+                    },
+                    "rating": 700
+                },
+                {
+                    "custid": "C2",
+                    "name": "Bob",
+                    "age": 40,
+                    "address": {
+                        "street": "456 Elm St",
+                        "city": "Boston, MA",
+                        "zipcode": "02118"
+                    },
+                    "rating": 600
+                },
+                {
+                    "custid": "C3",
+                    "name": "Charlie",
+                    "age": 35,
+                    "address": {
+                        "street": "789 Oak St",
+                        "city": "Chicago, IL",
+                        "zipcode": "60622"
+                    },
+                    "rating": 650
+                }
+            ]);
+        """)
+        print("Test data inserted successfully.")
+    finally:
+        client.close()
 
-# Test 4: Use isin() to filter rows
-df_isin = df.isin('address.city', ["St. Louis, MO", "Boston, MA"])
-print("\nAfter filtering using isin():")
-print(df_isin.head())
+def test_asterix_dataframe_operations():
+    """Test AsterixDataFrame operations with proper query context management."""
+    with Connection(base_url="http://localhost:19002") as conn:
+        df = AsterixDataFrame(conn, "test.Customers")
 
-# Test 5: Use between() to filter rows
-df_between = df.between('rating', 600, 750)
-print("\nAfter filtering ratings between 600 and 750 using between():")
-print(df_between.head())
+        # Test 1: Filter
+        df_stl = df[df['address.city'] == "St. Louis, MO"]
+        print("\nAfter filtering by city (address.city == 'St. Louis, MO'):")
+        print(df_stl.execute())
 
-# Test 6: Use filter_items() as an alternative to select
-df_filtered_items = df.filter_items(['name', 'rating'])
-print("\nAfter filtering columns using filter_items():")
-print(df_filtered_items.head())
+        # Test 2: Filter and select specific columns
+        filtered_df = df[df["age"] > 25][["name", "age"]]
+        print("\nAfter filtering where age > 25 and selecting columns (name, age):")
+        print(filtered_df.execute())
 
-# Test 7: Use column_slice() to select columns
-df_column_slice = df.column_slice('name', 'rating')
-print("\nAfter slicing columns between 'name' and 'rating':")
-print(df_column_slice.head())
+        # Test 3: Filter using mask()
+        df_masked = df[df['rating'] <= 600]  # Avoid using NOT conditions unnecessarily
+        print("\nAfter masking rows where rating > 600:")
+        print(df_masked.execute())
 
-# Test 8: Limit the number of results
-df_limited = df.limit(2)
-print("\nAfter applying limit(2):")
-print(df_limited.head())
+        # Test 4: Use isin() to filter rows
+        df_cities = df[['name', 'age', 'address.city', 'rating']]  # Explicitly reset columns
+        df_isin = df_cities[df_cities['address.city'].isin(["St. Louis, MO", "Boston, MA"])]
+        print("\nAfter filtering using isin(['St. Louis, MO', 'Boston, MA']):")
+        print(df_isin.execute())
 
-# Test 9: Apply offset
-df_offset = df.offset(1)
-print("\nAfter applying offset(1):")
-print(df_offset.head())
+        # Test 5: Use between() to filter rows
+        df_rating_range = df[['name', 'age', 'rating']]  # Explicitly reset columns
+        df_between = df_rating_range[df_rating_range['rating'].between(600, 750)]
+        print("\nAfter filtering ratings between 600 and 750:")
+        print(df_between.execute())
 
-# Test 10: Execute a final query
-result_stl = df_stl.execute()
-print("\nFinal result after execution:")
-print(result_stl)
+        # Test 6: Select specific columns
+        df_filtered_items = df[['name', 'rating']]
+        print("\nAfter selecting columns (name, rating):")
+        print(df_filtered_items.execute())
 
-# Uncomment if to_pandas() functionality is needed
-# print("Final result as Pandas DataFrame:")
-# print(result_stl.to_pandas())
+        # Test 7: Column slice (use explicit selection or indices)
+        df_column_slice = df[['name', 'age', 'rating']]  # Slice explicitly by known column names
+        print("\nAfter slicing columns between 'name' and 'rating':")
+        print(df_column_slice.execute())
+
+        # Test 8: Limit the number of results
+        df_limited = df.limit(2)
+        print("\nAfter limiting results to 2 rows:")
+        print(df_limited.execute())
+
+        # Test 9: Apply offset
+        df_offset = df.limit(2).offset(1)  # Combine limit and offset where applicable
+        print("\nAfter applying offset(1):")
+        print(df_offset.execute())
+
+        
+
+if __name__ == "__main__":
+    setup_test_data()
+    test_asterix_dataframe_operations()
