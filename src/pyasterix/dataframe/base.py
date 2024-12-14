@@ -250,25 +250,35 @@ class AsterixDataFrame:
         """Execute the built query and return a new AsterixDataFrame."""
         query = self.query_builder.build()
         print(f"\nExecuting Query: {query}")  # Debug print
-        
+
         try:
+            # Execute the query
             self.cursor.execute(query)
-            
-            # Convert results to proper format
+
+            # Fetch results from the cursor
             results = self.cursor.fetchall()
-            
-            # Create new DataFrame with results
+
+            # Create a new AsterixDataFrame with the results
             new_df = AsterixDataFrame(self.connection, self.dataset)
             new_df.result_set = results
-            
-            # If results exist but are empty, ensure proper structure
+
+            # Handle cases where no results are returned
             if not results:
                 new_df.result_set = []
-                
+
+            # Reset the query context after execution
+            self.query_builder.reset()
+
             return new_df
-            
+
         except Exception as e:
             raise QueryError(f"Failed to execute query: {str(e)}")
+
+
+    def reset(self):
+        """Reset all query parts."""
+        self.query_builder.reset()
+
 
     def __repr__(self) -> str:
         """Return a string representation of the DataFrame."""

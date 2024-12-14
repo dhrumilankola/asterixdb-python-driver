@@ -92,13 +92,29 @@ class AsterixPredicate:
 
         # Handle simple predicates
         field_ref = f"{alias}.{self.attribute.name}" if self.attribute else ""
-        if isinstance(self.value, (str, datetime, date)):
-            value = f"'{self.value}'"
-        elif isinstance(self.value, (list, tuple)):
-            value = f"({', '.join(map(str, self.value))})"
+
+        # Special handling for IN and BETWEEN operators
+        if self.operator == "IN":
+            if isinstance(self.value, list):
+                value = f"({', '.join(f'\'{v}\'' if isinstance(v, str) else str(v) for v in self.value)})"
+            else:
+                raise ValueError(f"IN operator requires a list of values, got: {self.value}")
+        elif self.operator == "BETWEEN":
+            if isinstance(self.value, tuple) and len(self.value) == 2:
+                value = f"{self.value[0]} AND {self.value[1]}"
+            else:
+                raise ValueError(f"BETWEEN operator requires a tuple with two values, got: {self.value}")
         else:
-            value = str(self.value)
+            # General case
+            if isinstance(self.value, (str, datetime, date)):
+                value = f"'{self.value}'"
+            elif isinstance(self.value, (list, tuple)):
+                value = f"({', '.join(map(str, self.value))})"
+            else:
+                value = str(self.value)
+
         return f"{field_ref} {self.operator} {value}"
+
 
 
 

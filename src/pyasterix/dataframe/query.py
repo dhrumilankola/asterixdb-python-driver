@@ -34,11 +34,15 @@ class AsterixQueryBuilder:
 
     def from_table(self, dataset: str) -> 'AsterixQueryBuilder':
         """Set the dataset and extract dataverse if provided."""
-        if '.' in dataset:
-            self.current_dataverse, self.from_dataset = dataset.split('.')
+        if dataset:
+            if '.' in dataset:
+                self.current_dataverse, self.from_dataset = dataset.split('.')
+            else:
+                self.from_dataset = dataset
         else:
-            self.from_dataset = dataset
+            raise ValueError("Dataset must be provided for the FROM clause.")
         return self
+
 
     def select(self, columns: List[str]) -> 'AsterixQueryBuilder':
         """Set the columns to select."""
@@ -206,7 +210,7 @@ class AsterixQueryBuilder:
         return " ".join(self.unnest_clauses)
 
     def reset(self):
-        """Reset all query parts."""
+        """Reset all query parts except the dataset."""
         self.select_cols = []
         self.where_clauses = []
         self.group_by_columns = []
@@ -214,6 +218,5 @@ class AsterixQueryBuilder:
         self.order_by_columns = []
         self.unnest_clauses = []
         self.joins = []
-        self.from_dataset = None
         self.limit_val = None
         self.offset_val = None
