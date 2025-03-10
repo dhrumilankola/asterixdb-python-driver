@@ -29,25 +29,18 @@ class AsterixDataFrame:
         self.result_set = None
         self.mock_result = []
 
-    def __getitem__(self, key: Union[str, List[str], AsterixPredicate]) -> Union['AsterixDataFrame', AsterixAttribute]:
+    def __getitem__(self, key: Union[str, List[str], AsterixPredicate]) -> 'AsterixDataFrame':
         if isinstance(key, str):
-            # Column access: df['column']
-            attr = AsterixAttribute(
-                name=key,
-                parent=self
-            )
-            # Explicitly set the dataset from parent
-            attr.parent.dataset = self.dataset  # Add this line
-            return attr
+            # Single column access
+            return AsterixAttribute(name=key, parent=self)
         elif isinstance(key, list):
-            # Multiple column selection: df[['col1', 'col2']]
+            # Multiple columns selection
             return self.select(key)
         elif isinstance(key, AsterixPredicate):
-            # Boolean indexing: df[df['column'] > 5]
+            # Filter rows
             return self.filter(key)
         else:
             raise TypeError(f"Invalid key type: {type(key)}")
-
             
     def select(self, columns: List[str]) -> 'AsterixDataFrame':
         """Select specific columns."""
@@ -95,10 +88,12 @@ class AsterixDataFrame:
         self.mock_result = self.mock_result[n:]
         return self
     
-    def groupby(self, column: str) -> 'AsterixDataFrame':
-        """Group by a column."""
-        self.query_builder.groupby(column)
-        return self
+    def groupby(self, column: Union[str, List[str]]) -> 'AsterixGroupBy':
+        """Group by one or more columns."""
+        if isinstance(column, str):
+            column = [column]
+        return AsterixGroupBy(self, column)
+
     
     def aggregate(
         self,
@@ -129,36 +124,10 @@ class AsterixDataFrame:
 
         return self
 
-
-    
-    def order_by(
-        self, 
-        columns: Union[str, List[str]], 
-        desc: bool = False
-    ) -> 'AsterixDataFrame':
-        """
-        Add ORDER BY clause to query.
-        
-        Args:
-            columns: Column(s) to sort by. Can be single column name or list of columns.
-            desc: True for descending order, False for ascending
-            
-        Returns:
-            Updated AsterixDataFrame
-        """
-        # Validate column names
+    def order_by(self, columns: Union[str, List[str]], desc: bool = False) -> 'AsterixDataFrame':
+        """Add ORDER BY clause to the query."""
         if isinstance(columns, str):
             columns = [columns]
-            
-        for col in columns:
-            if " AS " in col:
-                # For columns with aliases, validate the base column
-                base_col = col.split(" AS ")[0].strip()
-                if "." not in base_col:  # Not already qualified
-                    self._validate_field_name(base_col)
-            else:
-                self._validate_field_name(col)
-                
         self.query_builder.order_by(columns, desc)
         return self
 
@@ -247,10 +216,14 @@ class AsterixDataFrame:
 
     def mask(self, condition: AsterixPredicate) -> 'AsterixDataFrame':
         """Keeps rows where the condition is False."""
+        if not isinstance(condition, AsterixPredicate):
+            raise ValueError("Condition must be an instance of AsterixPredicate.")
+        
         negated_condition = AsterixPredicate(
-            attribute=condition.attribute,
-            operator=f"NOT ({condition.operator})",
-            value=condition.value
+            attribute=None,
+            operator="NOT",
+            value=condition,
+            is_compound=True
         )
         return self.filter(negated_condition)
 
@@ -277,25 +250,35 @@ class AsterixDataFrame:
         """Execute the built query and return a new AsterixDataFrame."""
         query = self.query_builder.build()
         print(f"\nExecuting Query: {query}")  # Debug print
-        
+
         try:
+            # Execute the query
             self.cursor.execute(query)
-            
-            # Convert results to proper format
+
+            # Fetch results from the cursor
             results = self.cursor.fetchall()
-            
-            # Create new DataFrame with results
+
+            # Create a new AsterixDataFrame with the results
             new_df = AsterixDataFrame(self.connection, self.dataset)
             new_df.result_set = results
-            
-            # If results exist but are empty, ensure proper structure
+
+            # Handle cases where no results are returned
             if not results:
                 new_df.result_set = []
-                
+
+            # Reset the query context after execution
+            self.query_builder.reset()
+
             return new_df
-            
+
         except Exception as e:
             raise QueryError(f"Failed to execute query: {str(e)}")
+
+
+    def reset(self):
+        """Reset all query parts."""
+        self.query_builder.reset()
+
 
     def __repr__(self) -> str:
         """Return a string representation of the DataFrame."""
@@ -308,17 +291,15 @@ class AsterixDataFrame:
         """Return a user-friendly string representation of the DataFrame."""
         return self.__repr__()
 
-    def head(self, n: int = 5) -> List[Dict[str, Any]]:
-        """Return the first n rows of the mock result."""
-        if self.result_set is not None:
-            return self.result_set[:n]
-        return self.mock_result[:n]
+    def head(self, n: int = 5) -> 'AsterixDataFrame':
+        """Limit the number of results to the first n rows."""
+        return self.limit(n)
 
-    def tail(self, n: int = 5) -> List[Dict[str, Any]]:
-        """Return the last n rows of the mock result."""
-        if self.result_set is not None:
-            return self.result_set[-n:]
-        return self.mock_result[-n:]
+    def tail(self, n: int = 5) -> 'AsterixDataFrame':
+        """Return the last n rows by applying offset."""
+        self.execute()  # Execute query to get result_set
+        total_rows = len(self.result_set)
+        return self.offset(total_rows - n)
 
     def to_pandas(self) -> pd.DataFrame:
         """Convert the result set to a Pandas DataFrame."""
@@ -338,3 +319,16 @@ class AsterixDataFrame:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Clean up resources when exiting context."""
         self.close()
+        
+class AsterixGroupBy:
+    """Handles group-by operations for AsterixDataFrame."""
+    
+    def __init__(self, dataframe: 'AsterixDataFrame', group_columns: List[str]):
+        self.dataframe = dataframe
+        self.group_columns = group_columns
+
+    def agg(self, aggregates: Dict[str, str]) -> 'AsterixDataFrame':
+        """Apply aggregation after grouping."""
+        self.dataframe.query_builder.groupby(self.group_columns)
+        self.dataframe.query_builder.aggregate(aggregates)
+        return self.dataframe
