@@ -1,7 +1,12 @@
-from src.pyasterix._http_client import AsterixDBHttpClient
-from src.pyasterix.dataframe import AsterixDataFrame
 import pandas as pd
 import time
+import os
+import sys
+# Add the root path to the system path for imports
+root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+sys.path.insert(0, root_path)
+from src.pyasterix._http_client import AsterixDBHttpClient
+from src.pyasterix.dataframe import AsterixDataFrame
 
 # Initialize the client
 client = AsterixDBHttpClient()

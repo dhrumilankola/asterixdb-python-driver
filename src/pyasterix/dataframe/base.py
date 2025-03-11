@@ -10,7 +10,7 @@ from .query import AsterixQueryBuilder
 class AsterixDataFrame:
     """DataFrame-like interface for AsterixDB datasets."""
 
-    def __init__(self, connection: Connection, dataset: str):
+    def __init__(self, connection, dataset):
         """
         Initialize AsterixDataFrame.
         
@@ -26,7 +26,13 @@ class AsterixDataFrame:
         self.dataset = dataset
         self.query_builder = AsterixQueryBuilder()
         self.query_builder.from_table(dataset)
+        
+        # Result tracking
+        self._executed = False
         self.result_set = None
+        self._query = None
+        
+        # For handling mock results (prior to execution)
         self.mock_result = []
 
     def __getitem__(self, key: Union[str, List[str], AsterixPredicate]) -> 'AsterixDataFrame':
@@ -48,33 +54,44 @@ class AsterixDataFrame:
         self.mock_result = [{col: f"<{col}>" for col in columns}]
         return self
     
-    def filter(self, predicate: AsterixPredicate) -> 'AsterixDataFrame':
+    def filter(self, predicate):
         """Add a filter condition to the query."""
-        # Handle compound predicates recursively
-        if predicate.is_compound:
-            if predicate.left_pred:
-                self.filter(predicate.left_pred)
-            if predicate.right_pred:
-                self.filter(predicate.right_pred)
+        if not isinstance(predicate, AsterixPredicate):
+            raise TypeError(f"Predicate must be an AsterixPredicate object, got {type(predicate)}")
+        
+        try:
+            # Handle compound predicates recursively
+            if predicate.is_compound:
+                if predicate.left_pred:
+                    self.filter(predicate.left_pred)
+                if predicate.right_pred:
+                    self.filter(predicate.right_pred)
+                return self
+
+            # Set correct alias based on dataset
+            if predicate.attribute and predicate.attribute.parent:
+                parent_dataset = predicate.attribute.parent.dataset
+                
+                # If this dataset is involved in a join, find and set the correct alias
+                joins_updated = False
+                for join in self.query_builder.joins:
+                    if parent_dataset == join['right_table']:
+                        predicate.update_alias(join['alias_right'])
+                        joins_updated = True
+                        break
+                    elif parent_dataset == self.dataset:
+                        predicate.update_alias(join['alias_left'])
+                        joins_updated = True
+                        break
+                
+                # If no join matched, use default alias
+                if not joins_updated:
+                    predicate.update_alias(self.query_builder.alias)
+
+            self.query_builder.where(predicate)
             return self
-
-        # Set correct alias based on dataset
-        if predicate.attribute:
-            if predicate.attribute.parent.dataset == 'Businesses':
-                predicate.update_alias('b')
-            elif predicate.attribute.parent.dataset == 'Reviews':
-                predicate.update_alias('r')
-            else:
-                # For other datasets, use join aliases if available
-                if self.query_builder.joins:
-                    for join in self.query_builder.joins:
-                        if predicate.attribute.parent.dataset == join['right_table']:
-                            predicate.update_alias(join['alias_right'])
-                        elif predicate.attribute.parent.dataset == self.dataset:
-                            predicate.update_alias(join['alias_left'])
-
-        self.query_builder.where(predicate)
-        return self
+        except Exception as e:
+            raise QueryBuildError(f"Failed to add filter: {str(e)}")
 
     def limit(self, n: int) -> 'AsterixDataFrame':
         """Limit the number of results."""
@@ -187,31 +204,42 @@ class AsterixDataFrame:
         """Keeps rows where the condition is True."""
         return self.filter(condition)
 
-
-    def join(
-        self,
-        other: 'AsterixDataFrame',
-        on: str,
-        alias_left: str,
-        alias_right: str
-    ) -> 'AsterixDataFrame':
-        """
-        Join another dataset.
-
-        Args:
-            other: The other AsterixDataFrame to join.
-            on: The column to join on.
-            alias_left: Alias for the left dataset.
-            alias_right: Alias for the right dataset.
-        """
+    def join(self, other, on=None, how="INNER", left_on=None, right_on=None, 
+            alias_left=None, alias_right=None):
+        """Join with another AsterixDataFrame."""
         if not isinstance(other, AsterixDataFrame):
-            raise ValueError("Can only join with another AsterixDataFrame")
+            raise TypeError(f"Can only join with another AsterixDataFrame, got {type(other)}")
+        
+        # Set default aliases if not provided
+        alias_left = alias_left or self.query_builder.alias
+        alias_right = alias_right or f"r{len(self.query_builder.joins)}"
+        
+        # Update the alias in the query builder to match the alias_left
+        self.query_builder.set_alias(alias_left)
+        
+        # Determine join columns
+        if on:
+            left_on = on
+            right_on = on
+        elif not (left_on and right_on):
+            raise ValueError("Must provide either 'on' or both 'left_on' and 'right_on'")
+        
+        # Strip dataverse from right table if it contains a dataverse prefix
+        right_table = other.dataset
+        if '.' in right_table:
+            # Extract just the dataset name without the dataverse
+            right_table = right_table.split('.')[-1]
+        
+        # Add the join to the query builder
         self.query_builder.add_join(
-            right_table=other.dataset,
-            on=on,
+            right_table=right_table,
+            how=how,
+            left_on=left_on,
+            right_on=right_on,
             alias_left=alias_left,
             alias_right=alias_right
         )
+        
         return self
 
     def mask(self, condition: AsterixPredicate) -> 'AsterixDataFrame':
@@ -246,39 +274,93 @@ class AsterixDataFrame:
         selected_cols = [col for col in self.mock_result[0] if start_col <= col <= end_col]
         return self.select(selected_cols)
 
-    def execute(self) -> 'AsterixDataFrame':
-        """Execute the built query and return a new AsterixDataFrame."""
+    def execute(self):
+        """Execute the built query and store the results."""
+        # Build the query
         query = self.query_builder.build()
-        print(f"\nExecuting Query: {query}")  # Debug print
-
+        self._query = query
+        
         try:
             # Execute the query
             self.cursor.execute(query)
-
-            # Fetch results from the cursor
-            results = self.cursor.fetchall()
-
-            # Create a new AsterixDataFrame with the results
-            new_df = AsterixDataFrame(self.connection, self.dataset)
-            new_df.result_set = results
-
-            # Handle cases where no results are returned
-            if not results:
-                new_df.result_set = []
-
-            # Reset the query context after execution
-            self.query_builder.reset()
-
-            return new_df
-
+            
+            # Store the raw results
+            raw_results = self.cursor.fetchall()
+            
+            # Process the results to ensure consistent format
+            processed_results = self._process_results(raw_results)
+            
+            # Update result set
+            self.result_set = processed_results
+            self._executed = True
+            
+            # Return self for method chaining
+            return self
+            
         except Exception as e:
-            raise QueryError(f"Failed to execute query: {str(e)}")
+            raise QueryError(f"Failed to execute query: {str(e)}\nQuery: {query}")
 
+    def _ensure_executed(self):
+        """Ensure the query has been executed."""
+        if not self._executed:
+            self.execute()
+
+    def _process_results(self, raw_results):
+        """Process raw results from AsterixDB to ensure consistent format."""
+        if not raw_results:
+            return []
+            
+        # Handle different types of results
+        processed = []
+        
+        for item in raw_results:
+            # Handle dictionaries directly
+            if isinstance(item, dict):
+                processed.append(item)
+            # Handle scalar values
+            elif not hasattr(item, '__iter__') or isinstance(item, (str, bytes)):
+                processed.append({"value": item})
+            # Handle lists/tuples
+            elif isinstance(item, (list, tuple)):
+                # Try to convert to dict if it looks like a key-value structure
+                if len(item) % 2 == 0:
+                    try:
+                        processed.append(dict(zip(item[::2], item[1::2])))
+                    except (TypeError, ValueError):
+                        processed.append({"value": item})
+                else:
+                    processed.append({"value": item})
+            else:
+                # Default fallback
+                processed.append({"value": item})
+        
+        return processed
+
+    def fetchall(self):
+        """Fetch all results as a list of dictionaries."""
+        self._ensure_executed()
+        return self.result_set
+    
+    def fetchone(self):
+        """Fetch the first result."""
+        self._ensure_executed()
+        if not self.result_set:
+            return None
+        return self.result_set[0]
 
     def reset(self):
         """Reset all query parts."""
         self.query_builder.reset()
 
+    def __iter__(self):
+        """Allow iteration over results."""
+        self._ensure_executed()
+        return iter(self.result_set)
+
+    def __len__(self):
+        """Return the number of results."""
+        self._ensure_executed()
+        return len(self.result_set)
 
     def __repr__(self) -> str:
         """Return a string representation of the DataFrame."""
@@ -301,10 +383,15 @@ class AsterixDataFrame:
         total_rows = len(self.result_set)
         return self.offset(total_rows - n)
 
-    def to_pandas(self) -> pd.DataFrame:
-        """Convert the result set to a Pandas DataFrame."""
-        if self.result_set is None:
-            raise RuntimeError("No results available. Execute the query first.")
+    def to_pandas(self):
+        """Convert the result set to a pandas DataFrame."""
+        self._ensure_executed()
+        
+        import pandas as pd
+        if not self.result_set:
+            # Return empty DataFrame with appropriate structure
+            return pd.DataFrame()
+        
         return pd.DataFrame(self.result_set)
 
     def close(self):
