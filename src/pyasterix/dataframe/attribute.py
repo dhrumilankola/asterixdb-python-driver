@@ -25,7 +25,6 @@ class AsterixPredicate:
         self.parent = self.attribute.parent if self.attribute else None
         self.dataset = self.parent.dataset if self.parent else None
         self._alias = None
-        self._alias = None
 
     def __post_init__(self):
         # Propagate parent from attribute to predicate
@@ -111,10 +110,14 @@ class AsterixPredicate:
             right = self.right_pred.to_sql()
             return f"({left}) {self.operator} ({right})"
         
-        # Get the correct alias to use
-        alias = self.get_alias()
+        # Special handling for aggregates
+        if isinstance(self.attribute, AsterixAggregateAttribute):
+            field_ref = self.attribute.to_sql()
+            formatted_value = self._format_value(self.value)
+            return f"{field_ref} {self.operator} {formatted_value}"
         
-        # Handle simple predicates
+        # Regular attribute handling
+        alias = self.get_alias()
         field_ref = f"{alias}.{self.attribute.name}" if self.attribute else ""
         
         # Special handling for different operators and value types
@@ -152,8 +155,40 @@ class AsterixPredicate:
             return str(value)
     
 
-
-
+class AsterixAggregateAttribute:
+    """Represents an aggregated column in a query."""
+    
+    def __init__(self, attribute, function):
+        self.attribute = attribute
+        self.function = function
+        self.name = attribute.name
+        self.parent = attribute.parent
+        
+    def __gt__(self, other):
+        return AsterixPredicate(self, ">", other)
+        
+    def __lt__(self, other):
+        return AsterixPredicate(self, "<", other)
+        
+    def __ge__(self, other):
+        return AsterixPredicate(self, ">=", other)
+        
+    def __le__(self, other):
+        return AsterixPredicate(self, "<=", other)
+        
+    def __eq__(self, other):
+        return AsterixPredicate(self, "=", other)
+        
+    def __ne__(self, other):
+        return AsterixPredicate(self, "!=", other)
+        
+    def to_sql(self):
+        """Convert to SQL string for HAVING clause."""
+        if "." in self.name:
+            return f"{self.function}({self.name})"
+        else:
+            alias = self.attribute._get_effective_alias()
+            return f"{self.function}({alias}.{self.name})"
 
 
 class AsterixAttribute:
@@ -226,3 +261,23 @@ class AsterixAttribute:
     def split(self, delimiter: str) -> 'AsterixAttribute':
         """Split string field by delimiter."""
         return AsterixAttribute(f"split({self.name}, '{delimiter}')", self.parent)
+    
+    def count(self):
+        """Create a COUNT() aggregation."""
+        return AsterixAggregateAttribute(self, "COUNT")
+    
+    def sum(self):
+        """Create a SUM() aggregation."""
+        return AsterixAggregateAttribute(self, "SUM")
+    
+    def avg(self):
+        """Create an AVG() aggregation."""
+        return AsterixAggregateAttribute(self, "AVG")
+    
+    def min(self):
+        """Create a MIN() aggregation."""
+        return AsterixAggregateAttribute(self, "MIN")
+    
+    def max(self):
+        """Create a MAX() aggregation."""
+        return AsterixAggregateAttribute(self, "MAX")

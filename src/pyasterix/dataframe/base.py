@@ -50,6 +50,10 @@ class AsterixDataFrame:
             
     def select(self, columns: List[str]) -> 'AsterixDataFrame':
         """Select specific columns."""
+        # Reset aggregates when doing a new select
+        self.query_builder.aggregates = {}
+        
+        # Set the new columns
         self.query_builder.select(columns)
         self.mock_result = [{col: f"<{col}>" for col in columns}]
         return self
@@ -105,41 +109,166 @@ class AsterixDataFrame:
         self.mock_result = self.mock_result[n:]
         return self
     
-    def groupby(self, column: Union[str, List[str]]) -> 'AsterixGroupBy':
-        """Group by one or more columns."""
-        if isinstance(column, str):
-            column = [column]
-        return AsterixGroupBy(self, column)
-
-    
-    def aggregate(
-        self,
-        aggregates: Dict[str, str],
-        group_by: Optional[Union[str, List[str]]] = None
-    ) -> 'AsterixDataFrame':
+    def group_by(self, columns):
         """
-        Add aggregate functions to the query.
+        Group DataFrame by columns.
+        
         Args:
-            aggregates: Dictionary mapping field names to aggregate functions
-            group_by: Optional field or list of fields to group by
+            columns: Column name or list of column names to group by
+            
         Returns:
-            Updated AsterixDataFrame with aggregation logic
+            AsterixDataFrame: Grouped DataFrame ready for aggregation
         """
-        # Validate aggregate functions
-        valid_aggs = {"AVG", "SUM", "COUNT", "MIN", "MAX", "ARRAY_AGG"}
-        for col, func in aggregates.items():
-            if func.upper() not in valid_aggs:
-                raise ValidationError(f"Invalid aggregate function: {func}")
-            self.query_builder.aggregate({col: func.upper()})
-
-        # Handle group by fields
-        if group_by:
-            if isinstance(group_by, str):
-                self.query_builder.groupby([group_by])
-            elif isinstance(group_by, list):
-                self.query_builder.groupby(group_by)
-
+        if isinstance(columns, str):
+            columns = [columns]
+            
+        self.query_builder.groupby(columns)
         return self
+
+    def having(self, predicate):
+        """
+        Filter groups based on an aggregated value.
+        
+        Args:
+            predicate: AsterixPredicate for filtering aggregated results
+            
+        Returns:
+            AsterixDataFrame: Filtered DataFrame
+        """
+        self.query_builder.having(predicate)
+        return self
+
+    def from_subquery(self, subquery, alias=None):
+        """
+        Create a DataFrame from a subquery.
+        
+        Args:
+            subquery: SQL++ query string or another AsterixDataFrame
+            alias: Alias for the subquery (default: 'sub')
+            
+        Returns:
+            AsterixDataFrame: New DataFrame based on the subquery
+        """
+        alias = alias or f"sub{id(subquery) % 100}"  # Generate alias if not provided
+        
+        if isinstance(subquery, AsterixDataFrame):
+            # Use query from another DataFrame
+            sub_query = subquery.query_builder
+        else:
+            # Use raw query string
+            sub_query = subquery
+            
+        # Create a new DataFrame with the same connection
+        result = AsterixDataFrame(self.connection, None)
+        result.query_builder.add_subquery(sub_query, alias)
+        
+        return result
+    
+    def agg(self, agg_dict):
+        """
+        Aggregate using one or more operations.
+        
+        Args:
+            agg_dict: Dictionary of column names to aggregate functions
+                    Example: {'column1': 'COUNT', 'column2': 'SUM'}
+        
+        Returns:
+            AsterixDataFrame: New DataFrame with aggregated results
+        """
+        if not agg_dict:
+            return self
+            
+        # Format aggregations into the expected format
+        formatted_aggs = {}
+        for col, func in agg_dict.items():
+            if isinstance(func, str):
+                func_name = func.upper()
+                # Handle special case for COUNT(*) to create a valid alias
+                if col == '*':
+                    result_col = f"count_star"  # Use a valid alias instead of *_count
+                else:
+                    result_col = f"{col}_{func_name.lower()}"
+                    
+                formatted_aggs[result_col] = {
+                    'column': col,
+                    'function': func_name
+                }
+            elif isinstance(func, list):
+                # Handle case where multiple aggregations apply to one column
+                for f in func:
+                    f_name = f.upper()
+                    # Handle special case for COUNT(*) here too
+                    if col == '*':
+                        result_col = f"{f_name.lower()}_star"
+                    else:
+                        result_col = f"{col}_{f_name.lower()}"
+                        
+                    formatted_aggs[result_col] = {
+                        'column': col,
+                        'function': f_name
+                    }
+            
+        # Add aggregations to query builder
+        self.query_builder.aggregate(formatted_aggs)
+        
+        return self
+
+    def count(self):
+        """
+        Count rows in each group or the entire DataFrame.
+        
+        Returns:
+            AsterixDataFrame: DataFrame with count results
+        """
+        # Create a new DataFrame to avoid modifying the original
+        result_df = AsterixDataFrame(self.connection, self.dataset)
+        result_df.query_builder = self.query_builder
+        
+        # Clear any existing aggregates before adding COUNT
+        result_df.query_builder.aggregates = {}
+        
+        # Add the count aggregation
+        return result_df.agg({'*': 'COUNT'})
+    
+    def sum(self, columns=None):
+        """
+        Sum of values in specified columns.
+        
+        Args:
+            columns: List of columns to sum or None for all numeric columns
+            
+        Returns:
+            AsterixDataFrame: DataFrame with sum results
+        """
+        if not columns:
+            # In a real implementation, we would determine numeric columns
+            raise ValueError("Must specify columns to sum")
+            
+        if isinstance(columns, str):
+            columns = [columns]
+            
+        agg_dict = {col: 'SUM' for col in columns}
+        return self.agg(agg_dict)  
+
+    def avg(self, columns=None):
+        """
+        Average of values in specified columns.
+        
+        Args:
+            columns: List of columns to average or None for all numeric columns
+            
+        Returns:
+            AsterixDataFrame: DataFrame with average results
+        """
+        if not columns:
+            # In a real implementation, we would determine numeric columns
+            raise ValueError("Must specify columns to average")
+            
+        if isinstance(columns, str):
+            columns = [columns]
+            
+        agg_dict = {col: 'AVG' for col in columns}
+        return self.agg(agg_dict)
 
     def order_by(self, columns: Union[str, List[str]], desc: bool = False) -> 'AsterixDataFrame':
         """Add ORDER BY clause to the query."""
@@ -350,7 +479,17 @@ class AsterixDataFrame:
 
     def reset(self):
         """Reset all query parts."""
-        self.query_builder.reset()
+        # Create a fresh query builder instead of reusing the existing one
+        self.query_builder = AsterixQueryBuilder()
+        self.query_builder.from_table(self.dataset)
+        
+        # Reset result tracking
+        self._executed = False
+        self.result_set = None
+        self._query = None
+        self.mock_result = []
+        
+        return self
 
     def __iter__(self):
         """Allow iteration over results."""

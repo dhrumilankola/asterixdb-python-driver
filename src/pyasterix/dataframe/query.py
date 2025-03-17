@@ -10,6 +10,8 @@ class AsterixQueryBuilder:
         self.where_clauses = []
         self.group_by_columns = []
         self.aggregates = {}
+        self.from_subqueries = []  
+        self.having_clauses = []  
         self.order_by_columns = []
         self.joins = []
         self.from_dataset = None
@@ -17,6 +19,8 @@ class AsterixQueryBuilder:
         self.offset_val = None
         self.alias = "t"  # Default table alias
         self.current_dataverse = None
+        self.column_aliases = set()
+        self.unnest_clauses = []
 
     def set_alias(self, alias):
         """Set the primary alias for the main dataset."""
@@ -63,6 +67,73 @@ class AsterixQueryBuilder:
         self.where_clauses.append(predicate)
         return self
 
+    def aggregate(self, agg_dict):
+        """
+        Add aggregation functions to the query.
+        
+        Args:
+            agg_dict: Dictionary where keys are result column names and 
+                    values are dictionaries with 'column' and 'function' keys
+                    or simple strings representing function names
+        """
+        valid_aggs = {"AVG", "SUM", "COUNT", "MIN", "MAX", "ARRAY_AGG"}
+        
+        for result_col, agg_info in agg_dict.items():
+            if isinstance(agg_info, dict):
+                # Handle dictionary format from base.py
+                func = agg_info.get('function', 'COUNT')
+                if func.upper() not in valid_aggs:
+                    raise ValueError(f"Invalid aggregate function: {func}")
+                # Store as is
+                self.aggregates[result_col] = agg_info
+            elif isinstance(agg_info, str):
+                # Handle string format (for direct calls)
+                if agg_info.upper() not in valid_aggs:
+                    raise ValueError(f"Invalid aggregate function: {agg_info}")
+                # Convert to dictionary format
+                self.aggregates[result_col] = {
+                    'function': agg_info.upper(),
+                    'column': result_col if result_col != '*' else '*'
+                }
+            else:
+                raise ValueError(f"Invalid aggregate specification: {agg_info}")
+            self.column_aliases.add(result_col)
+
+        return self
+    
+    def add_subquery(self, subquery, alias):
+        """
+        Add a subquery to the FROM clause.
+        
+        Args:
+            subquery: Either a SQL string or another AsterixQueryBuilder
+            alias: Alias for the subquery result
+        """
+        if isinstance(subquery, AsterixQueryBuilder):
+            # Convert query builder to a query string - strip off trailing semicolon
+            query_str = subquery.build().rstrip(';')
+            # If the query has USE dataverse, remove it for subquery
+            if query_str.startswith("USE "):
+                query_str = query_str[query_str.index(';') + 1:].strip()
+        else:
+            # Assume it's already a string
+            query_str = subquery
+            
+        self.from_subqueries.append({
+            'query': query_str,
+            'alias': alias
+        })
+        return self
+    
+    def having(self, predicate):
+        """
+        Add a HAVING clause for filtering grouped results.
+        
+        Args:
+            predicate: AsterixPredicate for filtering aggregated results
+        """
+        self.having_clauses.append(predicate)
+        return self
 
     def _ensure_correct_alias(self, predicate: AsterixPredicate) -> None:
         """Ensure predicate has correct alias based on its dataset."""
@@ -89,17 +160,6 @@ class AsterixQueryBuilder:
             self.group_by_columns = [columns]
         else:
             self.group_by_columns = columns
-        return self
-
-    def aggregate(self, aggregates: Dict[str, str]) -> 'AsterixQueryBuilder':
-        """Add aggregate functions to the query."""
-        valid_aggs = {"AVG", "SUM", "COUNT", "MIN", "MAX", "ARRAY_AGG"}
-        for col, func in aggregates.items():
-            if func.upper() not in valid_aggs:
-                raise ValidationError(f"Invalid aggregate function: {func}")
-            self._validate_field_name(col)
-            self.aggregates[col] = func.upper()
-
         return self
 
     def order_by(self, columns, desc=False):
@@ -129,7 +189,7 @@ class AsterixQueryBuilder:
         select_clause = self._build_select_clause()
         query.append(select_clause)
         
-        # Build FROM clause with JOINs
+        # Build FROM clause with JOINs and subqueries
         from_clause = self._build_from_clause()
         query.append(from_clause)
         
@@ -142,6 +202,12 @@ class AsterixQueryBuilder:
         group_by_clause = self._build_group_by_clause()
         if group_by_clause:
             query.append(group_by_clause)
+        
+        # Build HAVING clause (only when GROUP BY is used)
+        if group_by_clause:
+            having_clause = self._build_having_clause()
+            if having_clause:
+                query.append(having_clause)
         
         # Build ORDER BY clause
         order_by_clause = self._build_order_by_clause()
@@ -160,39 +226,112 @@ class AsterixQueryBuilder:
         return " ".join(parts)
 
     def _build_select_clause(self):
-        """Build the SELECT clause with proper aliases."""
-        # If no columns specified, select all
+        """Build the SELECT clause with aggregates."""
+        # If no columns or aggregates, select all
         if not self.select_cols and not self.aggregates:
             return f"SELECT VALUE {self.alias}"
         
         # Process selected columns
         select_parts = []
         for col in self.select_cols:
-            # Handle column with explicit alias
+            # Handle column with explicit alias (AS)
             if " AS " in col:
-                select_parts.append(col)
-            # Handle qualified column reference (with table name/alias)
+                # For expressions, ensure table alias is applied to field references
+                parts = col.split(" AS ", 1)
+                expr = parts[0].strip()
+                alias = parts[1].strip()
+                
+                # Check if it's a simple column reference or an expression
+                if "." in expr or " " in expr or "(" in expr or ")" in expr or "+" in expr or "-" in expr or "*" in expr or "/" in expr or "%" in expr:
+                    # It's an expression or already qualified column - keep as is
+                    select_parts.append(col)
+                else:
+                    # Simple column - qualify with table alias
+                    select_parts.append(f"{self.alias}.{expr} AS {alias}")
+            # Handle already qualified column reference
             elif "." in col:
                 select_parts.append(col)
             # Handle simple column name
             else:
                 select_parts.append(f"{self.alias}.{col}")
         
+        # Add aggregates
+        for result_col, agg_info in self.aggregates.items():
+            func_name = agg_info['function']
+            column = agg_info['column']
+            
+            # Format column reference based on whether it's * or a specific column
+            if column == '*':
+                select_parts.append(f"{func_name}(*) AS {result_col}")
+            elif "." in column:
+                select_parts.append(f"{func_name}({column}) AS {result_col}")
+            else:
+                select_parts.append(f"{func_name}({self.alias}.{column}) AS {result_col}")
+        
+        # Return final SELECT clause
+        return f"SELECT {', '.join(select_parts)}" if select_parts else f"SELECT VALUE {self.alias}"
+        
+        # Add aggregates
+        for result_col, agg_info in self.aggregates.items():
+            func_name = agg_info['function']
+            column = agg_info['column']
+            
+            # Format column reference based on whether it's * or a specific column
+            if column == '*':
+                select_parts.append(f"{func_name}(*) AS {result_col}")
+            elif "." in column:
+                select_parts.append(f"{func_name}({column}) AS {result_col}")
+            else:
+                select_parts.append(f"{func_name}({self.alias}.{column}) AS {result_col}")
+        
         # Return final SELECT clause
         return f"SELECT {', '.join(select_parts)}" if select_parts else f"SELECT VALUE {self.alias}"
 
     def _build_from_clause(self):
-        """Build the FROM clause with JOINs."""
-        clause = f"FROM {self.from_dataset} {self.alias}"
+        """Build the FROM clause with subqueries and JOINs."""
+        # Handle regular table source
+        if self.from_dataset:
+            clause = f"FROM {self.from_dataset} {self.alias}"
+        # Handle subquery source
+        elif self.from_subqueries:
+            subq = self.from_subqueries[0]  # Use first subquery as main FROM
+            clause = f"FROM ({subq['query']}) {subq['alias']}"
+            self.alias = subq['alias']  # Update default alias
+        else:
+            raise ValueError("No data source specified for query")
         
-        # Add all joins
+        # Add additional subqueries as joins if there are multiple
+        if len(self.from_subqueries) > 1:
+            for i, subq in enumerate(self.from_subqueries[1:], 1):
+                join_alias = subq['alias']
+                clause += f" JOIN ({subq['query']}) {join_alias} ON {self.alias}.id = {join_alias}.id"
+        
+        # Add regular joins
         for join in self.joins:
             alias_left = join.get('alias_left', self.alias)
             clause += f" {join['join_type']} {join['right_table']} {join['alias_right']} " \
-                    f"ON {alias_left}.{join['left_on']} = {join['alias_right']}.{join['right_on']}"
+                     f"ON {alias_left}.{join['left_on']} = {join['alias_right']}.{join['right_on']}"
         
+        # Add UNNEST clauses if any
+        if self.unnest_clauses:
+            clause += " " + self._build_unnest_clause()
+            
         return clause
 
+    def _build_having_clause(self):
+        """Build the HAVING clause by combining all predicates."""
+        if not self.having_clauses:
+            return ""
+            
+        # Convert all predicates to SQL strings and join with AND
+        having_conditions = []
+        for pred in self.having_clauses:
+            sql = pred.to_sql()
+            if sql:  # Only add non-empty conditions
+                having_conditions.append(sql)
+                
+        return f"HAVING {' AND '.join(having_conditions)}" if having_conditions else ""
+    
     def _build_where_clause(self):
         """Build the WHERE clause by combining all predicates."""
         if not self.where_clauses:
@@ -213,32 +352,46 @@ class AsterixQueryBuilder:
         if not self.group_by_columns:
             return ""
             
+        # Extract aliases from select_cols
+        aliases = {}
+        for col in self.select_cols:
+            if " AS " in col:
+                # Get the alias part
+                original_col, alias = col.split(" AS ", 1)
+                aliases[alias.strip()] = original_col.strip()
+        
         group_cols = []
         for col in self.group_by_columns:
-            if "." in col:
+            # Check if this column is actually an alias
+            if col in aliases:
+                # Use the alias directly in GROUP BY
+                group_cols.append(col)
+            elif "." in col:
+                # Already qualified column
                 group_cols.append(col)
             else:
+                # Regular column name, prefix with table alias
                 group_cols.append(f"{self.alias}.{col}")
-                
+                    
         return f"GROUP BY {', '.join(group_cols)}" if group_cols else ""
 
     def _build_order_by_clause(self):
-        """Build the ORDER BY clause."""
-        if not self.order_by_columns:
-            return ""
-            
-        order_parts = []
-        for col_info in self.order_by_columns:
-            col = col_info["column"]
-            is_desc = col_info["desc"]
-            
-            # Handle qualified column reference
-            if "." in col:
-                order_parts.append(f"{col} {'DESC' if is_desc else 'ASC'}")
-            else:
-                order_parts.append(f"{self.alias}.{col} {'DESC' if is_desc else 'ASC'}")
+            """Build the ORDER BY clause."""
+            if not self.order_by_columns:
+                return ""
                 
-        return f"ORDER BY {', '.join(order_parts)}" if order_parts else ""
+            order_parts = []
+            for col_info in self.order_by_columns:
+                col = col_info["column"]
+                is_desc = col_info["desc"]
+                
+                # Check if this column is an alias or has qualified name
+                if col in self.column_aliases or "." in col:
+                    order_parts.append(f"{col} {'DESC' if is_desc else 'ASC'}")
+                else:
+                    order_parts.append(f"{self.alias}.{col} {'DESC' if is_desc else 'ASC'}")
+                    
+            return f"ORDER BY {', '.join(order_parts)}" if order_parts else ""
 
     def _build_join_clause(self) -> str:
         """Build the JOIN clause."""
@@ -293,24 +446,13 @@ class AsterixQueryBuilder:
         return self
         
     def add_unnest(self, field: str, alias: str, function: Optional[str] = None, table_alias: Optional[str] = None) -> None:
-            """Add UNNEST clause to query."""
-            table_alias = table_alias or self.alias
-            if function:
-                self.unnest_clauses.append(f"UNNEST {function} AS {alias}")
-            else:
-                self.unnest_clauses.append(f"UNNEST {table_alias}.{field} AS {alias}")
+        """Add UNNEST clause to query."""
+        table_alias = table_alias or self.alias
+        if function:
+            self.unnest_clauses.append(f"UNNEST {function} AS {alias}")
+        else:
+            self.unnest_clauses.append(f"UNNEST {table_alias}.{field} AS {alias}")
                 
     def _build_unnest_clause(self) -> str:
         """Build the UNNEST clause."""
         return " ".join(self.unnest_clauses)
-
-    def reset(self):
-        """Reset all query parts except the dataset."""
-        self.select_cols = []
-        self.where_clauses = []
-        self.group_by_columns = []
-        self.aggregates = {}
-        self.order_by_columns = []
-        self.joins = []
-        self.limit_val = None
-        self.offset_val = None
