@@ -46,23 +46,16 @@ def execute_query_async(_conn, query, max_attempts=10, poll_interval=1, _progres
         attempt = 1
         results = None
         while attempt <= max_attempts:
-            status_result = cursor._get_query_status(cursor.results['handle'])
-            # Try to get progress info from the driver
-            fetched = status_result.get("fetched", None)
-            total = status_result.get("total", None)
+            # Update progress based solely on attempt count
             if _progress_callback:
-                if fetched is None or total is None:
-                    # Simulate progress using attempt count if driver doesn't supply values.
-                    _progress_callback(attempt, max_attempts)
-                else:
-                    if status_result.get("status") == "success":
-                        _progress_callback(total, total)  # Force 100% when complete.
-                    else:
-                        _progress_callback(fetched, total)
+                _progress_callback(attempt, max_attempts)
+            status_result = cursor._get_query_status(cursor.results['handle'])
             if status_result.get("status") == "success":
                 results = cursor._get_query_result(status_result['handle'])
                 if isinstance(results, dict) and "results" in results:
                     results = results["results"]
+                if _progress_callback:
+                    _progress_callback(max_attempts, max_attempts)
                 break
             elif status_result.get("status") in ("FAILED", "FATAL"):
                 raise Exception(f"Async query failed with status: {status_result.get('status')}")

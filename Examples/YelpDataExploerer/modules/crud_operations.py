@@ -135,32 +135,30 @@ def run(conn):
         st.markdown("##### Generated Query")
         st.code(query, language="sql")
 
-        if st.button("Execute Query"):
-            with st.spinner("Executing query..."):
-                try:
-                    if mode == "sync":
-                        result = execute_query_sync(conn, query)
-                    else:
-                        # Create progress UI elements
-                        progress_bar = st.progress(0)
-                        progress_text = st.empty()
-                        def update_progress(fetched, total):
-                            if total:
-                                progress = min(fetched / total, 1.0)
-                                progress_bar.progress(progress)
-                                progress_text.text(f"Fetched {fetched} of {total} rows...")
-                            else:
-                                progress_text.text(f"Fetched {fetched} rows so far...")
-                        result = execute_query_async(conn, query, _progress_callback=update_progress)
-                    st.markdown("##### Query Results")
-                    if not result.empty:
-                        st.dataframe(result)
-                        csv = result.to_csv(index=False)
-                        st.download_button("Download CSV", csv, "query_results.csv", "text/csv")
-                    else:
-                        st.info("No results found for your query.")
-                except Exception as e:
-                    st.error(f"Error executing query: {e}")
+    if st.button("Execute Query"):
+        with st.spinner("Executing query..."):
+            try:
+                if mode == "sync":
+                    result = execute_query_sync(conn, query)
+                else:
+                    # Create progress UI elements for async mode
+                    progress_bar = st.progress(0)
+                    progress_text = st.empty()
+                    def update_progress(current, total):
+                        progress_ratio = current / total
+                        progress_percentage = int(progress_ratio * 100)
+                        progress_bar.progress(progress_ratio)
+                        progress_text.text(f"Progress: {progress_percentage}%")
+                    result = execute_query_async(conn, query, _progress_callback=update_progress)
+                st.markdown("##### Query Results")
+                if not result.empty:
+                    st.dataframe(result)
+                    csv = result.to_csv(index=False)
+                    st.download_button("Download CSV", csv, "query_results.csv", "text/csv")
+                else:
+                    st.info("No results found for your query.")
+            except Exception as e:
+                st.error(f"Error executing query: {e}")
 
     elif operation == "Delete":
         st.markdown("#### Delete Business")

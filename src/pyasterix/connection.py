@@ -36,13 +36,9 @@ class Connection:
         self.retry_delay = retry_delay
         self._closed = False
 
-        # HTTP session with default headers
+        # HTTP session without default headers - we'll set them per request
         self.session = requests.Session()
-        self.session.headers.update({
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        })
-
+        
         logger.info(f"Initialized Connection with base URL: {base_url}")
 
     def cursor(self) -> Cursor:
