@@ -1,7 +1,8 @@
 from typing import Union, List, Any, Dict, Tuple, Optional
 import pandas as pd
 from src.pyasterix._http_client import AsterixDBHttpClient
-from src.pyasterix.exceptions import ValidationError
+from ..connection import Connection
+from src.pyasterix.exceptions import *
 from .attribute import AsterixAttribute, AsterixPredicate
 from .query import AsterixQueryBuilder
 
@@ -9,70 +10,92 @@ from .query import AsterixQueryBuilder
 class AsterixDataFrame:
     """DataFrame-like interface for AsterixDB datasets."""
 
-    def __init__(self, client: AsterixDBHttpClient, dataset: str):
-        if not isinstance(client, AsterixDBHttpClient):
-            raise TypeError("client must be an instance of AsterixDBHttpClient")
+    def __init__(self, connection, dataset):
+        """
+        Initialize AsterixDataFrame.
+        
+        Args:
+            connection: AsterixDB connection instance
+            dataset: Name of the dataset to query
+        """
+        if not isinstance(connection, Connection):
+            raise ValidationError("connection must be an instance of Connection")
             
-        self.client = client
+        self.connection = connection
+        self.cursor = connection.cursor()
         self.dataset = dataset
         self.query_builder = AsterixQueryBuilder()
         self.query_builder.from_table(dataset)
-        self.result_set = None  # Stores results after query execution
-        self.mock_result = []  # Mock results for inspection
+        
+        # Result tracking
+        self._executed = False
+        self.result_set = None
+        self._query = None
+        
+        # For handling mock results (prior to execution)
+        self.mock_result = []
 
-    def __getitem__(self, key: Union[str, List[str], AsterixPredicate]) -> Union['AsterixDataFrame', AsterixAttribute]:
+    def __getitem__(self, key: Union[str, List[str], AsterixPredicate]) -> 'AsterixDataFrame':
         if isinstance(key, str):
-            # Column access: df['column']
-            attr = AsterixAttribute(
-                name=key,
-                parent=self
-            )
-            # Explicitly set the dataset from parent
-            attr.parent.dataset = self.dataset  # Add this line
-            return attr
+            # Single column access
+            return AsterixAttribute(name=key, parent=self)
         elif isinstance(key, list):
-            # Multiple column selection: df[['col1', 'col2']]
+            # Multiple columns selection
             return self.select(key)
         elif isinstance(key, AsterixPredicate):
-            # Boolean indexing: df[df['column'] > 5]
+            # Filter rows
             return self.filter(key)
         else:
             raise TypeError(f"Invalid key type: {type(key)}")
-
             
     def select(self, columns: List[str]) -> 'AsterixDataFrame':
         """Select specific columns."""
+        # Reset aggregates when doing a new select
+        self.query_builder.aggregates = {}
+        
+        # Set the new columns
         self.query_builder.select(columns)
         self.mock_result = [{col: f"<{col}>" for col in columns}]
         return self
     
-    def filter(self, predicate: AsterixPredicate) -> 'AsterixDataFrame':
+    def filter(self, predicate):
         """Add a filter condition to the query."""
-        # Handle compound predicates recursively
-        if predicate.is_compound:
-            if predicate.left_pred:
-                self.filter(predicate.left_pred)
-            if predicate.right_pred:
-                self.filter(predicate.right_pred)
+        if not isinstance(predicate, AsterixPredicate):
+            raise TypeError(f"Predicate must be an AsterixPredicate object, got {type(predicate)}")
+        
+        try:
+            # Handle compound predicates recursively
+            if predicate.is_compound:
+                if predicate.left_pred:
+                    self.filter(predicate.left_pred)
+                if predicate.right_pred:
+                    self.filter(predicate.right_pred)
+                return self
+
+            # Set correct alias based on dataset
+            if predicate.attribute and predicate.attribute.parent:
+                parent_dataset = predicate.attribute.parent.dataset
+                
+                # If this dataset is involved in a join, find and set the correct alias
+                joins_updated = False
+                for join in self.query_builder.joins:
+                    if parent_dataset == join['right_table']:
+                        predicate.update_alias(join['alias_right'])
+                        joins_updated = True
+                        break
+                    elif parent_dataset == self.dataset:
+                        predicate.update_alias(join['alias_left'])
+                        joins_updated = True
+                        break
+                
+                # If no join matched, use default alias
+                if not joins_updated:
+                    predicate.update_alias(self.query_builder.alias)
+
+            self.query_builder.where(predicate)
             return self
-
-        # Set correct alias based on dataset
-        if predicate.attribute:
-            if predicate.attribute.parent.dataset == 'Businesses':
-                predicate.update_alias('b')
-            elif predicate.attribute.parent.dataset == 'Reviews':
-                predicate.update_alias('r')
-            else:
-                # For other datasets, use join aliases if available
-                if self.query_builder.joins:
-                    for join in self.query_builder.joins:
-                        if predicate.attribute.parent.dataset == join['right_table']:
-                            predicate.update_alias(join['alias_right'])
-                        elif predicate.attribute.parent.dataset == self.dataset:
-                            predicate.update_alias(join['alias_left'])
-
-        self.query_builder.where(predicate)
-        return self
+        except Exception as e:
+            raise QueryBuildError(f"Failed to add filter: {str(e)}")
 
     def limit(self, n: int) -> 'AsterixDataFrame':
         """Limit the number of results."""
@@ -86,78 +109,171 @@ class AsterixDataFrame:
         self.mock_result = self.mock_result[n:]
         return self
     
-    def groupby(self, column: str) -> 'AsterixDataFrame':
-        """Group by a column."""
-        self.query_builder.groupby(column)
-        return self
-    
-    def aggregate(
-        self,
-        aggregates: Dict[str, str],
-        group_by: Optional[Union[str, List[str]]] = None
-    ) -> 'AsterixDataFrame':
+    def group_by(self, columns):
         """
-        Add aggregate functions to the query.
+        Group DataFrame by columns.
         
         Args:
-            aggregates: Dictionary mapping field names to aggregate functions 
-                    e.g., {"stars": "AVG", "review_count": "SUM"}
-            group_by: Optional field or list of fields to group by
-                
-        Returns:
-            AsterixDataFrame with aggregation added to query
-        """
-        # Validate aggregate functions
-        valid_aggs = {"AVG", "SUM", "COUNT", "MIN", "MAX", "ARRAY_AGG"}
-        for col, func in aggregates.items():
-            if func.upper() not in valid_aggs:
-                raise ValidationError(f"Invalid aggregate function: {func}")
-            self._validate_field_name(col)
-
-        # Handle group by fields
-        if group_by:
-            if isinstance(group_by, str):
-                self._validate_field_name(group_by)
-                self.query_builder.groupby(group_by)
-            elif isinstance(group_by, list):
-                for field in group_by:
-                    self._validate_field_name(field)
-                self.query_builder.groupby(group_by)
-            else:
-                raise ValidationError("group_by must be string or list of strings")
-
-        # Add aggregates to query builder
-        self.query_builder.aggregate(aggregates)
-        return self
-    
-    def order_by(
-        self, 
-        columns: Union[str, List[str]], 
-        desc: bool = False
-    ) -> 'AsterixDataFrame':
-        """
-        Add ORDER BY clause to query.
-        
-        Args:
-            columns: Column(s) to sort by. Can be single column name or list of columns.
-            desc: True for descending order, False for ascending
+            columns: Column name or list of column names to group by
             
         Returns:
-            Updated AsterixDataFrame
+            AsterixDataFrame: Grouped DataFrame ready for aggregation
         """
-        # Validate column names
         if isinstance(columns, str):
             columns = [columns]
             
-        for col in columns:
-            if " AS " in col:
-                # For columns with aliases, validate the base column
-                base_col = col.split(" AS ")[0].strip()
-                if "." not in base_col:  # Not already qualified
-                    self._validate_field_name(base_col)
-            else:
-                self._validate_field_name(col)
-                
+        self.query_builder.groupby(columns)
+        return self
+
+    def having(self, predicate):
+        """
+        Filter groups based on an aggregated value.
+        
+        Args:
+            predicate: AsterixPredicate for filtering aggregated results
+            
+        Returns:
+            AsterixDataFrame: Filtered DataFrame
+        """
+        self.query_builder.having(predicate)
+        return self
+
+    def from_subquery(self, subquery, alias=None):
+        """
+        Create a DataFrame from a subquery.
+        
+        Args:
+            subquery: SQL++ query string or another AsterixDataFrame
+            alias: Alias for the subquery (default: 'sub')
+            
+        Returns:
+            AsterixDataFrame: New DataFrame based on the subquery
+        """
+        alias = alias or f"sub{id(subquery) % 100}"  # Generate alias if not provided
+        
+        if isinstance(subquery, AsterixDataFrame):
+            # Use query from another DataFrame
+            sub_query = subquery.query_builder
+        else:
+            # Use raw query string
+            sub_query = subquery
+            
+        # Create a new DataFrame with the same connection
+        result = AsterixDataFrame(self.connection, None)
+        result.query_builder.add_subquery(sub_query, alias)
+        
+        return result
+    
+    def agg(self, agg_dict):
+        """
+        Aggregate using one or more operations.
+        
+        Args:
+            agg_dict: Dictionary of column names to aggregate functions
+                    Example: {'column1': 'COUNT', 'column2': 'SUM'}
+        
+        Returns:
+            AsterixDataFrame: New DataFrame with aggregated results
+        """
+        if not agg_dict:
+            return self
+            
+        # Format aggregations into the expected format
+        formatted_aggs = {}
+        for col, func in agg_dict.items():
+            if isinstance(func, str):
+                func_name = func.upper()
+                # Handle special case for COUNT(*) to create a valid alias
+                if col == '*':
+                    result_col = f"count_star"  # Use a valid alias instead of *_count
+                else:
+                    result_col = f"{col}_{func_name.lower()}"
+                    
+                formatted_aggs[result_col] = {
+                    'column': col,
+                    'function': func_name
+                }
+            elif isinstance(func, list):
+                # Handle case where multiple aggregations apply to one column
+                for f in func:
+                    f_name = f.upper()
+                    # Handle special case for COUNT(*) here too
+                    if col == '*':
+                        result_col = f"{f_name.lower()}_star"
+                    else:
+                        result_col = f"{col}_{f_name.lower()}"
+                        
+                    formatted_aggs[result_col] = {
+                        'column': col,
+                        'function': f_name
+                    }
+            
+        # Add aggregations to query builder
+        self.query_builder.aggregate(formatted_aggs)
+        
+        return self
+
+    def count(self):
+        """
+        Count rows in each group or the entire DataFrame.
+        
+        Returns:
+            AsterixDataFrame: DataFrame with count results
+        """
+        # Create a new DataFrame to avoid modifying the original
+        result_df = AsterixDataFrame(self.connection, self.dataset)
+        result_df.query_builder = self.query_builder
+        
+        # Clear any existing aggregates before adding COUNT
+        result_df.query_builder.aggregates = {}
+        
+        # Add the count aggregation
+        return result_df.agg({'*': 'COUNT'})
+    
+    def sum(self, columns=None):
+        """
+        Sum of values in specified columns.
+        
+        Args:
+            columns: List of columns to sum or None for all numeric columns
+            
+        Returns:
+            AsterixDataFrame: DataFrame with sum results
+        """
+        if not columns:
+            # In a real implementation, we would determine numeric columns
+            raise ValueError("Must specify columns to sum")
+            
+        if isinstance(columns, str):
+            columns = [columns]
+            
+        agg_dict = {col: 'SUM' for col in columns}
+        return self.agg(agg_dict)  
+
+    def avg(self, columns=None):
+        """
+        Average of values in specified columns.
+        
+        Args:
+            columns: List of columns to average or None for all numeric columns
+            
+        Returns:
+            AsterixDataFrame: DataFrame with average results
+        """
+        if not columns:
+            # In a real implementation, we would determine numeric columns
+            raise ValueError("Must specify columns to average")
+            
+        if isinstance(columns, str):
+            columns = [columns]
+            
+        agg_dict = {col: 'AVG' for col in columns}
+        return self.agg(agg_dict)
+
+    def order_by(self, columns: Union[str, List[str]], desc: bool = False) -> 'AsterixDataFrame':
+        """Add ORDER BY clause to the query."""
+        if isinstance(columns, str):
+            columns = [columns]
         self.query_builder.order_by(columns, desc)
         return self
 
@@ -217,41 +333,54 @@ class AsterixDataFrame:
         """Keeps rows where the condition is True."""
         return self.filter(condition)
 
-
-    def join(
-        self,
-        other: 'AsterixDataFrame',
-        on: str,
-        alias_left: str,
-        alias_right: str
-    ) -> 'AsterixDataFrame':
-        """
-        Join another dataset.
-
-        Args:
-            other: The other AsterixDataFrame to join.
-            on: The column to join on.
-            alias_left: Alias for the left dataset.
-            alias_right: Alias for the right dataset.
-        """
+    def join(self, other, on=None, how="INNER", left_on=None, right_on=None, 
+            alias_left=None, alias_right=None):
+        """Join with another AsterixDataFrame."""
         if not isinstance(other, AsterixDataFrame):
-            raise ValueError("Can only join with another AsterixDataFrame")
+            raise TypeError(f"Can only join with another AsterixDataFrame, got {type(other)}")
+        
+        # Set default aliases if not provided
+        alias_left = alias_left or self.query_builder.alias
+        alias_right = alias_right or f"r{len(self.query_builder.joins)}"
+        
+        # Update the alias in the query builder to match the alias_left
+        self.query_builder.set_alias(alias_left)
+        
+        # Determine join columns
+        if on:
+            left_on = on
+            right_on = on
+        elif not (left_on and right_on):
+            raise ValueError("Must provide either 'on' or both 'left_on' and 'right_on'")
+        
+        # Strip dataverse from right table if it contains a dataverse prefix
+        right_table = other.dataset
+        if '.' in right_table:
+            # Extract just the dataset name without the dataverse
+            right_table = right_table.split('.')[-1]
+        
+        # Add the join to the query builder
         self.query_builder.add_join(
-            right_table=other.dataset,
-            on=on,
+            right_table=right_table,
+            how=how,
+            left_on=left_on,
+            right_on=right_on,
             alias_left=alias_left,
             alias_right=alias_right
         )
+        
         return self
-
-
 
     def mask(self, condition: AsterixPredicate) -> 'AsterixDataFrame':
         """Keeps rows where the condition is False."""
+        if not isinstance(condition, AsterixPredicate):
+            raise ValueError("Condition must be an instance of AsterixPredicate.")
+        
         negated_condition = AsterixPredicate(
-            attribute=condition.attribute,
-            operator=f"NOT ({condition.operator})",
-            value=condition.value
+            attribute=None,
+            operator="NOT",
+            value=condition,
+            is_compound=True
         )
         return self.filter(negated_condition)
 
@@ -274,21 +403,103 @@ class AsterixDataFrame:
         selected_cols = [col for col in self.mock_result[0] if start_col <= col <= end_col]
         return self.select(selected_cols)
 
-    def execute(self) -> 'AsterixDataFrame':
-        """Execute the query and return a new AsterixDataFrame."""
+    def execute(self):
+        """Execute the built query and store the results."""
+        # Build the query
         query = self.query_builder.build()
-        print(f"\nExecuting Query: {query}")  # Debug print
+        self._query = query
         
         try:
-            result = self.client.execute_query(statement=query)
-            if isinstance(result, dict) and result.get('status') == 'success':
-                new_df = AsterixDataFrame(self.client, self.dataset)
-                new_df.result_set = result.get('results', [])
-                return new_df
-            else:
-                raise RuntimeError(f"Query failed: {result.get('error', 'Unknown error')}")
+            # Execute the query
+            self.cursor.execute(query)
+            
+            # Store the raw results
+            raw_results = self.cursor.fetchall()
+            
+            # Process the results to ensure consistent format
+            processed_results = self._process_results(raw_results)
+            
+            # Update result set
+            self.result_set = processed_results
+            self._executed = True
+            
+            # Return self for method chaining
+            return self
+            
         except Exception as e:
-            raise RuntimeError(f"Failed to execute query: {str(e)}")
+            raise QueryError(f"Failed to execute query: {str(e)}\nQuery: {query}")
+
+    def _ensure_executed(self):
+        """Ensure the query has been executed."""
+        if not self._executed:
+            self.execute()
+
+    def _process_results(self, raw_results):
+        """Process raw results from AsterixDB to ensure consistent format."""
+        if not raw_results:
+            return []
+            
+        # Handle different types of results
+        processed = []
+        
+        for item in raw_results:
+            # Handle dictionaries directly
+            if isinstance(item, dict):
+                processed.append(item)
+            # Handle scalar values
+            elif not hasattr(item, '__iter__') or isinstance(item, (str, bytes)):
+                processed.append({"value": item})
+            # Handle lists/tuples
+            elif isinstance(item, (list, tuple)):
+                # Try to convert to dict if it looks like a key-value structure
+                if len(item) % 2 == 0:
+                    try:
+                        processed.append(dict(zip(item[::2], item[1::2])))
+                    except (TypeError, ValueError):
+                        processed.append({"value": item})
+                else:
+                    processed.append({"value": item})
+            else:
+                # Default fallback
+                processed.append({"value": item})
+        
+        return processed
+
+    def fetchall(self):
+        """Fetch all results as a list of dictionaries."""
+        self._ensure_executed()
+        return self.result_set
+    
+    def fetchone(self):
+        """Fetch the first result."""
+        self._ensure_executed()
+        if not self.result_set:
+            return None
+        return self.result_set[0]
+
+    def reset(self):
+        """Reset all query parts."""
+        # Create a fresh query builder instead of reusing the existing one
+        self.query_builder = AsterixQueryBuilder()
+        self.query_builder.from_table(self.dataset)
+        
+        # Reset result tracking
+        self._executed = False
+        self.result_set = None
+        self._query = None
+        self.mock_result = []
+        
+        return self
+
+    def __iter__(self):
+        """Allow iteration over results."""
+        self._ensure_executed()
+        return iter(self.result_set)
+
+    def __len__(self):
+        """Return the number of results."""
+        self._ensure_executed()
+        return len(self.result_set)
 
     def __repr__(self) -> str:
         """Return a string representation of the DataFrame."""
@@ -301,20 +512,49 @@ class AsterixDataFrame:
         """Return a user-friendly string representation of the DataFrame."""
         return self.__repr__()
 
-    def head(self, n: int = 5) -> List[Dict[str, Any]]:
-        """Return the first n rows of the mock result."""
-        if self.result_set is not None:
-            return self.result_set[:n]
-        return self.mock_result[:n]
+    def head(self, n: int = 5) -> 'AsterixDataFrame':
+        """Limit the number of results to the first n rows."""
+        return self.limit(n)
 
-    def tail(self, n: int = 5) -> List[Dict[str, Any]]:
-        """Return the last n rows of the mock result."""
-        if self.result_set is not None:
-            return self.result_set[-n:]
-        return self.mock_result[-n:]
+    def tail(self, n: int = 5) -> 'AsterixDataFrame':
+        """Return the last n rows by applying offset."""
+        self.execute()  # Execute query to get result_set
+        total_rows = len(self.result_set)
+        return self.offset(total_rows - n)
 
-    def to_pandas(self) -> pd.DataFrame:
-        """Convert the result set to a Pandas DataFrame."""
-        if self.result_set is None:
-            raise RuntimeError("No results available. Execute the query first.")
+    def to_pandas(self):
+        """Convert the result set to a pandas DataFrame."""
+        self._ensure_executed()
+        
+        import pandas as pd
+        if not self.result_set:
+            # Return empty DataFrame with appropriate structure
+            return pd.DataFrame()
+        
         return pd.DataFrame(self.result_set)
+
+    def close(self):
+        """Close the cursor."""
+        if self.cursor:
+            self.cursor.close()
+
+    def __enter__(self):
+        """Support context manager protocol."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Clean up resources when exiting context."""
+        self.close()
+        
+class AsterixGroupBy:
+    """Handles group-by operations for AsterixDataFrame."""
+    
+    def __init__(self, dataframe: 'AsterixDataFrame', group_columns: List[str]):
+        self.dataframe = dataframe
+        self.group_columns = group_columns
+
+    def agg(self, aggregates: Dict[str, str]) -> 'AsterixDataFrame':
+        """Apply aggregation after grouping."""
+        self.dataframe.query_builder.groupby(self.group_columns)
+        self.dataframe.query_builder.aggregate(aggregates)
+        return self.dataframe

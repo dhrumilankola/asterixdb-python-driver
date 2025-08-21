@@ -1,4 +1,5 @@
 from src.pyasterix._http_client import AsterixDBHttpClient
+from src.pyasterix.connection import Connection
 from src.pyasterix.dataframe import AsterixDataFrame
 
 def setup_test_data():
@@ -92,51 +93,54 @@ def setup_test_data():
         client.close()
 
 
-
 def test_basic_queries():
     """Test basic DataFrame operations."""
-    client = AsterixDBHttpClient()
-    try:
-        # Verify dataset exists
-        print("\nVerifying test dataset exists...")
-        verify_query = """SELECT VALUE ds FROM Metadata.`Dataset` ds 
-                         WHERE ds.DatasetName = 'Customers';"""
-        result = client.execute_query(verify_query)
-        if not result.get('results'):
-            raise Exception("Test dataset not found! Please run setup first.")
+    # Use Connection instead of AsterixDBHttpClient
+    with Connection(base_url="http://localhost:19002") as conn:
+        try:
+            # Create cursor for verification query
+            cursor = conn.cursor()
+            
+            # Verify dataset exists
+            print("\nVerifying test dataset exists...")
+            verify_query = """SELECT VALUE ds FROM Metadata.`Dataset` ds 
+                            WHERE ds.DatasetName = 'Customers';"""
+            cursor.execute(verify_query)
+            result = cursor.fetchall()
+            if not result:
+                raise Exception("Test dataset not found! Please run setup first.")
 
-        df = AsterixDataFrame(client, "test.Customers")
-        print("\nTesting basic queries:")
-        
-        # Test 1: Simple selection with specific columns
-        print("\nTest 1: Select specific columns from customers")
-        result = df[['custid', 'name', 'age']].execute()
-        print(f"Selected customers: {result}")
-        
-        # Test 2: Filter with condition using AsterixAttribute
-        print("\nTest 2: Select customers with age > 30")
-        result = df[df['age'] > 30][['name', 'age']].execute()
-        print(f"Filtered customers: {result}")
-        
-        # Test 3: Multiple conditions
-        print("\nTest 3: Select customers with age > 30 and name starting with 'T'")
-        result = df[
-            (df['age'] > 30) & (df['name'].like('T%'))
-        ][['name', 'age']].execute()
-        print(f"Filtered customers with multiple conditions: {result}")
-        
-        # Test 4: Complex conditions
-        print("\nTest 4: Select customers with age > 30 or rating > 700")
-        result = df[
-            (df['age'] > 30) | (df['rating'] > 700)
-        ][['name', 'age', 'rating']].execute()
-        print(f"Filtered customers with OR conditions: {result}")
-        
-    except Exception as e:
-        print(f"Test failed: {str(e)}")
-        raise
-    finally:
-        client.close()
+            # Create DataFrame with connection
+            df = AsterixDataFrame(conn, "test.Customers")
+            print("\nTesting basic queries:")
+            
+            # Test 1: Simple selection with specific columns
+            print("\nTest 1: Select specific columns from customers")
+            result = df[['custid', 'name', 'age']].execute()
+            print(f"Selected customers: {result}")
+            
+            # Test 2: Filter with condition using AsterixAttribute
+            print("\nTest 2: Select customers with age > 30")
+            result = df[df['age'] > 30][['name', 'age']].execute()
+            print(f"Filtered customers: {result}")
+            
+            # Test 3: Multiple conditions
+            print("\nTest 3: Select customers with age > 30 and name starting with 'T'")
+            result = df[
+                (df['age'] > 30) & (df['name'].like('T%'))
+            ][['name', 'age']].execute()
+            print(f"Filtered customers with multiple conditions: {result}")
+            
+            # Test 4: Complex conditions
+            print("\nTest 4: Select customers with age > 30 or rating > 700")
+            result = df[
+                (df['age'] > 30) | (df['rating'] > 700)
+            ][['name', 'age', 'rating']].execute()
+            print(f"Filtered customers with OR conditions: {result}")
+            
+        except Exception as e:
+            print(f"Test failed: {str(e)}")
+            raise
 
 def main():
     try:
