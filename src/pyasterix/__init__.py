@@ -1,18 +1,20 @@
 """Python connector for AsterixDB."""
 
-# from .asterix_client import AsterixClient
-
-from ._http_client import (
-    AsterixDBHttpClient,
-    QueryExecutionError,
-    ConnectionTimeoutError,
-    InvalidJSONResponseError,
+from .connection import Connection
+from .cursor import Cursor
+from .exceptions import (
+    AsterixError, DatabaseError, InterfaceError, 
+    OperationalError, ProgrammingError, NotSupportedError
 )
 
 __version__ = "0.1.0"
 __all__ = [
-    'AsterixDBHttpClient',
-    'QueryExecutionError',
-    'ConnectionTimeoutError',
-    'InvalidJSONResponseError',
+    'Connection',
+    'Cursor', 
+    'AsterixError',
+    'DatabaseError',
+    'InterfaceError',
+    'OperationalError', 
+    'ProgrammingError',
+    'NotSupportedError',
 ]

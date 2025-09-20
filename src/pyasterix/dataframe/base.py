@@ -1,6 +1,5 @@
 from typing import Union, List, Any, Dict, Tuple, Optional
 import pandas as pd
-from src.pyasterix._http_client import AsterixDBHttpClient
 from ..connection import Connection
 from src.pyasterix.exceptions import *
 from .attribute import AsterixAttribute, AsterixPredicate
