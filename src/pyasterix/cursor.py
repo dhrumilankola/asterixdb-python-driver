@@ -2,7 +2,7 @@ import time
 import json
 from urllib.parse import urljoin
 import datetime
-from typing import Optional
+from typing import Optional, Any
 from .exceptions import DatabaseError, InterfaceError, NotSupportedError
 from .observability import ObservabilityManager
 
@@ -204,14 +204,28 @@ class Cursor:
                 
                 result_data = response.json()
 
-                # Handle asynchronous queries  
-                if mode == "async" and "handle" in result_data:
-                    self.results = result_data  # Preserve the full response for async queries
-                    if span and hasattr(span, 'set_attribute'):
-                        span.set_attribute("db.async.handle", result_data.get("handle"))
-                    if perf_logger:
-                        perf_logger.checkpoint("async_handle_extracted", 
-                                             handle=result_data.get("handle"))
+                # Handle asynchronous queries with enhanced support
+                if mode == "async":
+                    if "handle" in result_data:
+                        # Store full response for async handling
+                        self.results = result_data
+                        if span and hasattr(span, 'set_attribute'):
+                            span.set_attribute("db.async.handle", result_data.get("handle"))
+                            span.set_attribute("db.async.status", result_data.get("status", "unknown"))
+                        if perf_logger:
+                            perf_logger.checkpoint("async_handle_extracted", 
+                                                 handle=result_data.get("handle"),
+                                                 initial_status=result_data.get("status"))
+                        
+                        # For async queries, we can optionally auto-poll here
+                        # This maintains backward compatibility while allowing pool optimization
+                        if hasattr(self.connection, '_auto_poll_async') and self.connection._auto_poll_async:
+                            self._handle_async_query(result_data)
+                    else:
+                        # Immediate result in async mode (query completed quickly)
+                        self.results = result_data.get("results", [])
+                        if span and hasattr(span, 'set_attribute'):
+                            span.set_attribute("db.async.completed_immediately", True)
                 else:
                     self.results = result_data.get("results", [])
 
@@ -318,16 +332,46 @@ class Cursor:
         
         return ''.join(parts)
 
-    def _handle_async_query(self, initial_response: dict):
+    def get_async_result(self, timeout: Optional[float] = None) -> Any:
+        """
+        Get the result of an async query that was executed earlier.
+        
+        This method allows manual control over async query polling,
+        which is useful when working with connection pools.
+        
+        Args:
+            timeout: Maximum time to wait for result (in seconds)
+            
+        Returns:
+            Query results
+            
+        Raises:
+            DatabaseError: If query failed or timed out
+        """
+        if not isinstance(self.results, dict) or "handle" not in self.results:
+            raise DatabaseError("No async query handle available")
+        
+        return self._handle_async_query(self.results, timeout)
+    
+    def _handle_async_query(self, initial_response: dict, timeout: Optional[float] = None):
         """
         Handle asynchronous query execution with comprehensive tracing.
 
         Args:
             initial_response: Response from the initial async query request.
+            timeout: Optional timeout for the async operation
         """
         handle = initial_response.get("handle")
         if not handle:
             raise DatabaseError("Async query did not return a handle.")
+
+        # Use provided timeout or fall back to connection retry logic
+        if timeout is not None:
+            start_time = time.time()
+            max_retries = int(timeout / (self.connection.retry_delay or 0.1)) + 1
+        else:
+            start_time = None
+            max_retries = self.connection.max_retries
 
         # Create span for async polling operations
         span = None
@@ -335,7 +379,8 @@ class Cursor:
             span = self.observability.create_database_span(
                 operation="query.async.poll",
                 handle=handle,
-                max_retries=self.connection.max_retries
+                max_retries=max_retries,
+                timeout=timeout
             )
 
         try:
@@ -346,9 +391,17 @@ class Cursor:
                 if span and hasattr(span, 'set_attribute'):
                     span.set_attribute("db.async.handle", handle)
                     span.set_attribute("db.async.status_url", status_url)
-                    span.set_attribute("db.async.max_attempts", self.connection.max_retries)
+                    span.set_attribute("db.async.max_attempts", max_retries)
+                    if timeout:
+                        span.set_attribute("db.async.timeout", timeout)
 
-                while attempts < self.connection.max_retries:
+                while attempts < max_retries:
+                    # Check timeout if specified
+                    if timeout and start_time and (time.time() - start_time) > timeout:
+                        timeout_error = DatabaseError(f"Async query timeout after {timeout}s")
+                        if span and self.observability:
+                            self.observability.record_span_exception(span, timeout_error)
+                        raise timeout_error
                     # Create child span for each polling attempt
                     poll_span = None
                     if self.observability:
@@ -423,11 +476,16 @@ class Cursor:
                     attempts += 1
 
                 # Exceeded retry limit
-                timeout_error = DatabaseError("Async query did not complete within the retry limit.")
+                if timeout:
+                    timeout_error = DatabaseError(f"Async query timeout after {timeout}s and {attempts} attempts")
+                else:
+                    timeout_error = DatabaseError(f"Async query did not complete within {max_retries} retry attempts")
                 
                 if span and hasattr(span, 'set_attribute'):
                     span.set_attribute("db.async.final_status", "timeout")
                     span.set_attribute("db.async.total_attempts", attempts)
+                    if timeout:
+                        span.set_attribute("db.async.exceeded_timeout", True)
                 
                 if self.observability:
                     self.observability.record_span_exception(span, timeout_error)
