@@ -20,7 +20,7 @@ def setup_observability():
         metrics=MetricsConfig(
             enabled=True,
             namespace="yelp_data_explorer",
-            prometheus_port=8010let me   # Disable external Prometheus server
+            prometheus_port=8010  # Disable external Prometheus server
         ),
         tracing=TracingConfig(
             enabled=True,

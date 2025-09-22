@@ -10,7 +10,7 @@ st.set_page_config(
 
 from utils.styles import load_styles
 from utils.db import connect_to_asterixdb
-from modules import dashboard, business_explorer, query_lab, crud_operations
+from modules import dashboard, business_explorer, query_lab, crud_operations, observability_panel, embedded_observability
 
 # Load custom CSS styles
 load_styles()
@@ -30,7 +30,7 @@ st.sidebar.markdown("---")
 # Custom navigation radio (only these options will show)
 page = st.sidebar.radio(
     "Navigation",
-    ["Dashboard", "Business Explorer", "CRUD Operations", "Query Lab"],
+    ["Dashboard", "Business Explorer", "CRUD Operations", "Query Lab", "🔍 Observability", "📊 Embedded Observability"],
     index=0  # Default to Dashboard
 )
 
@@ -43,6 +43,10 @@ elif page == "Query Lab":
     query_lab.run(conn)
 elif page == "CRUD Operations":
     crud_operations.run(conn)
+elif page == "🔍 Observability":
+    observability_panel.run(conn)
+elif page == "📊 Embedded Observability":
+    embedded_observability.run(conn)
     
 st.sidebar.markdown("---")
 
