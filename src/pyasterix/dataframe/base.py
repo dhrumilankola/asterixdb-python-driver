@@ -408,25 +408,77 @@ class AsterixDataFrame:
         query = self.query_builder.build()
         self._query = query
         
+        # Create high-level DataFrame span
+        span = None
+        if hasattr(self.connection, 'observability') and self.connection.observability:
+            span = self.connection.observability.create_database_span(
+                operation="dataframe.execute",
+                query=query,
+                dataset=self.dataset
+            )
+            
+            # Add DataFrame-specific attributes
+            if span and hasattr(span, 'set_attribute'):
+                span.set_attribute("db.dataframe.dataset", self.dataset)
+                span.set_attribute("db.dataframe.operation", "execute")
+                span.set_attribute("db.query.builder", str(type(self.query_builder).__name__))
+                
+                # Add query complexity indicators
+                if hasattr(self.query_builder, 'joins') and self.query_builder.joins:
+                    span.set_attribute("db.query.joins", len(self.query_builder.joins))
+                if hasattr(self.query_builder, 'aggregates') and self.query_builder.aggregates:
+                    span.set_attribute("db.query.aggregates", len(self.query_builder.aggregates))
+                if hasattr(self.query_builder, 'where_clauses') and self.query_builder.where_clauses:
+                    span.set_attribute("db.query.where_clauses", len(self.query_builder.where_clauses))
+        
         try:
-            # Execute the query
-            self.cursor.execute(query)
-            
-            # Store the raw results
-            raw_results = self.cursor.fetchall()
-            
-            # Process the results to ensure consistent format
-            processed_results = self._process_results(raw_results)
-            
-            # Update result set
-            self.result_set = processed_results
-            self._executed = True
-            
-            # Return self for method chaining
-            return self
+            with span if span else self._noop_context():
+                # Execute the query (this will create child spans in cursor)
+                self.cursor.execute(query)
+                
+                # Store the raw results
+                raw_results = self.cursor.fetchall()
+                
+                # Process the results to ensure consistent format
+                processed_results = self._process_results(raw_results)
+                
+                # Update result set
+                self.result_set = processed_results
+                self._executed = True
+                
+                # Update span with results
+                if span and hasattr(span, 'set_attribute'):
+                    span.set_attribute("db.dataframe.result_count", len(processed_results))
+                    span.set_attribute("db.dataframe.executed", True)
+                    
+                    # Calculate result complexity
+                    if processed_results:
+                        first_row = processed_results[0]
+                        if isinstance(first_row, dict):
+                            span.set_attribute("db.dataframe.result_columns", len(first_row.keys()))
+                
+                # Mark span as successful
+                if span and self.connection.observability:
+                    self.connection.observability.set_span_success(span)
+                
+                # Return self for method chaining
+                return self
             
         except Exception as e:
+            # Record error in span
+            if span and self.connection.observability:
+                self.connection.observability.record_span_exception(span, e)
+            
             raise QueryError(f"Failed to execute query: {str(e)}\nQuery: {query}")
+    
+    def _noop_context(self):
+        """No-operation context manager for when tracing is disabled."""
+        class NoOpContext:
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+        return NoOpContext()
 
     def _ensure_executed(self):
         """Ensure the query has been executed."""

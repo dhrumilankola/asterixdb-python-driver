@@ -7,7 +7,14 @@ from datetime import datetime
 root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.insert(0, root_path)
 
-from src.pyasterix.connection import Connection 
+from src.pyasterix import (
+    connect, 
+    ObservabilityConfig, 
+    MetricsConfig, 
+    TracingConfig, 
+    LoggingConfig,
+    initialize_observability
+) 
 
 def print_header(title, description):
     """Print a formatted header for each query example."""
@@ -40,19 +47,68 @@ def execute_query(cursor, query, title):
     
     return results
 
+def setup_observability():
+    """Setup observability for PEP249 basic queries testing."""
+    config = ObservabilityConfig(
+        metrics=MetricsConfig(
+            enabled=True,
+            namespace="pyasterix_pep249_basic",
+            prometheus_port=8002
+        ),
+        tracing=TracingConfig(
+            enabled=True,
+            service_name="pep249_basic_queries",
+            sample_rate=1.0,
+            exporter="console"
+        ),
+        logging=LoggingConfig(
+            structured=True,
+            level="INFO",
+            correlation_enabled=True,
+            include_trace_info=True
+        )
+    )
+    
+    observability = initialize_observability(config)
+    print("✅ Observability initialized for PEP249 basic queries")
+    return observability
+
 def test_queries():
     try:
-        # Initialize connection
-        with Connection(base_url="http://localhost:19002") as conn:
-            print("\nConnection to AsterixDB established successfully.")
+        # Setup observability
+        observability = setup_observability()
+        logger = observability.get_logger("pep249.basic_queries")
+        
+        # Initialize connection with observability
+        with connect(
+            host="localhost",
+            port=19002,
+            observability_config=observability.config
+        ) as conn:
+            
+            # Start overall test span
+            with observability.start_span("pep249.basic_queries_test", kind="INTERNAL") as test_span:
+                logger.info("Starting PEP249 basic queries test", extra={
+                    "test_type": "basic_queries",
+                    "connection_type": "pep249"
+                })
+                
+                print("\nConnection to AsterixDB established successfully with observability.")
 
-            # Create a cursor
-            cursor = conn.cursor()
-            print("Database cursor created.")
+                # Create a cursor
+                cursor = conn.cursor()
+                print("Database cursor created.")
 
-            # Setup: Creating dataverse and datasets
-            print("\nSetting up test environment: Creating necessary dataverse and datasets")
-            setup_query = """
+                # Setup: Creating dataverse and datasets with observability tracking
+                print("\nSetting up test environment: Creating necessary dataverse and datasets")
+                
+                with observability.start_span("pep249.setup_environment", kind="INTERNAL") as setup_span:
+                    logger.info("Setting up test environment", extra={
+                        "operation": "setup",
+                        "task": "create_dataverse_datasets"
+                    })
+                    
+                    setup_query = """
                 DROP DATAVERSE TinySocial IF EXISTS;
                 CREATE DATAVERSE TinySocial;
                 USE TinySocial;

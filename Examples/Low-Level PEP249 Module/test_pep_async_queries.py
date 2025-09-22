@@ -5,17 +5,66 @@ import sys
 root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.insert(0, root_path)
 
-from src.pyasterix.connection import Connection
+from src.pyasterix import (
+    connect, 
+    ObservabilityConfig, 
+    MetricsConfig, 
+    TracingConfig, 
+    LoggingConfig,
+    initialize_observability
+)
+
+def setup_observability():
+    """Setup observability for async queries testing."""
+    config = ObservabilityConfig(
+        metrics=MetricsConfig(
+            enabled=True,
+            namespace="pyasterix_async_queries",
+            prometheus_port=8003
+        ),
+        tracing=TracingConfig(
+            enabled=True,
+            service_name="async_queries_service",
+            sample_rate=1.0,
+            exporter="console"
+        ),
+        logging=LoggingConfig(
+            structured=True,
+            level="INFO",
+            correlation_enabled=True,
+            include_trace_info=True
+        )
+    )
+    
+    observability = initialize_observability(config)
+    print("✅ Observability initialized for async queries")
+    return observability
 
 def test_async_queries():
     try:
-        # Initialize connection
-        with Connection(base_url="http://localhost:19002") as conn:
-            print("\nConnection initialized.")
+        # Setup observability
+        observability = setup_observability()
+        logger = observability.get_logger("async_queries")
+        
+        # Initialize connection with observability
+        with connect(
+            host="localhost",
+            port=19002,
+            observability_config=observability.config
+        ) as conn:
+            
+            # Start overall async test span
+            with observability.start_span("async_queries.test_suite", kind="INTERNAL") as test_span:
+                logger.info("Starting async queries test suite", extra={
+                    "test_type": "async_queries",
+                    "connection_type": "observability_enabled"
+                })
+                
+                print("\nConnection initialized with observability.")
 
-            # Create a cursor
-            cursor = conn.cursor()
-            print("Cursor created.")
+                # Create a cursor
+                cursor = conn.cursor()
+                print("Cursor created.")
 
             # Setup: Create necessary dataverse and dataset
             print("\nSetup: Creating dataverse and dataset for async test")
