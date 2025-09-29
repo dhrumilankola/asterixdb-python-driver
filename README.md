@@ -13,6 +13,29 @@ PyAsterix is a feature-rich Python library designed for seamless interaction wit
 
 ## Installation
 
+Install from PyPI:
+
+```
+pip install pyasterix
+```
+
+With observability extras (Prometheus + OpenTelemetry):
+
+```
+pip install "pyasterix[observability]"
+```
+
+Install from source (editable for development):
+
+```
+git clone https://github.com/your-org/pyasterix.git
+cd pyasterix
+python -m venv .venv
+".venv"/Scripts/activate
+pip install -U pip build twine
+pip install -e .
+```
+
 ## Features
 Core Features
 - PEP 249 compliant database interface
