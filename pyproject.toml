@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyasterix"
-version = "0.1.1"
+version = "0.1.3"
 description = "Python connector for AsterixDB"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.8"
@@ -34,7 +34,6 @@ dependencies = [
 observability = [
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
-    "opentelemetry-exporter-prometheus>=1.12.0rc1",
     "prometheus-client>=0.17.0",
     "opentelemetry-exporter-otlp>=1.20.0",
     "opentelemetry-exporter-jaeger>=1.20.0",

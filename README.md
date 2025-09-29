@@ -1,6 +1,6 @@
-# PyAsterix: Python Connector for AsterixDB
+# PyAsterix: Python Connector for Apache AsterixDB
 
-PyAsterix is a feature-rich Python library designed for seamless interaction with AsterixDB, a scalable NoSQL database management system. It offers two powerful interfaces: a low-level DB-API compliant interface and a high-level DataFrame API.
+PyAsterix is a feature-rich Python library designed for seamless interaction with Apache AsterixDB, a scalable NoSQL database management system. It offers two powerful interfaces: a low-level DB-API compliant interface and a high-level DataFrame API.
 
 ## Table of Contents
 - [Installation](#installation)
