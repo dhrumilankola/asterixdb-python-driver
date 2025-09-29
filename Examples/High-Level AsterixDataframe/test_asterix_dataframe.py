@@ -14,7 +14,14 @@ from datetime import datetime
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 # Import our modules
-from src.pyasterix.connection import Connection
+from src.pyasterix import (
+    connect, 
+    ObservabilityConfig, 
+    MetricsConfig, 
+    TracingConfig, 
+    LoggingConfig,
+    initialize_observability
+)
 from src.pyasterix.dataframe.base import AsterixDataFrame
 from src.pyasterix.dataframe.attribute import AsterixAttribute
 from src.pyasterix.exceptions import QueryError, ValidationError
@@ -25,16 +32,66 @@ def print_section(title):
     print(f"  {title}")
     print("=" * 80)
 
-def test_asterix_dataframe():
-    """Test the AsterixDataFrame implementation using TinySocial dataset."""
-    print_section("INITIALIZING CONNECTION")
+def setup_observability():
+    """Setup observability for DataFrame testing."""
+    config = ObservabilityConfig(
+        metrics=MetricsConfig(
+            enabled=True,
+            namespace="pyasterix_dataframe_test",
+            prometheus_port=8004
+        ),
+        tracing=TracingConfig(
+            enabled=True,
+            service_name="dataframe_test_service",
+            sample_rate=1.0,
+            exporter="console"
+        ),
+        logging=LoggingConfig(
+            structured=True,
+            level="INFO",
+            correlation_enabled=True,
+            include_trace_info=True
+        )
+    )
     
-    # Connect to AsterixDB
+    observability = initialize_observability(config)
+    print("✅ Observability initialized for DataFrame testing")
+    return observability
+
+def test_asterix_dataframe():
+    """Test the AsterixDataFrame implementation using TinySocial dataset with observability."""
+    print_section("INITIALIZING CONNECTION WITH OBSERVABILITY")
+    
+    # Setup observability
+    observability = setup_observability()
+    logger = observability.get_logger("dataframe_test")
+    
+    # Connect to AsterixDB with observability
     try:
-        conn = Connection(base_url="http://localhost:19002")
-        print("✓ Connection initialized successfully")
+        with observability.start_span("dataframe_test.initialization", kind="INTERNAL") as init_span:
+            logger.info("Initializing DataFrame test", extra={
+                "test_type": "dataframe_operations",
+                "dataset": "TinySocial"
+            })
+            
+            conn = connect(
+                host="localhost",
+                port=19002,
+                observability_config=observability.config
+            )
+            
+            print("✓ Connection initialized successfully with observability")
+            
+            init_span.set_attribute("connection_status", "success")
+            
     except Exception as e:
         print(f"✗ Failed to connect to AsterixDB: {e}")
+        if observability:
+            observability.record_metric(
+                "dataframe_test.connection_failures",
+                1,
+                {"error_type": type(e).__name__}
+            )
         return
     
     # Step 1: Create test dataverse and dataset

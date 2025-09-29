@@ -60,6 +60,16 @@ class AsterixQueryBuilder:
     def select(self, columns):
         """Set the columns to select."""
         self.select_cols = columns
+        
+        # Track aliases from SELECT clause
+        for col in columns:
+            if " AS " in col:
+                # Extract the alias part
+                parts = col.split(" AS ", 1)
+                if len(parts) == 2:
+                    alias = parts[1].strip()
+                    self.column_aliases.add(alias)
+        
         return self
 
     def where(self, predicate):
@@ -174,6 +184,36 @@ class AsterixQueryBuilder:
                 self.order_by_columns.append({"column": col, "desc": is_desc})
         return self
 
+    def _apply_table_alias_to_expression(self, expr):
+        """Apply table alias to unqualified column references in expressions."""
+        import re
+        
+        # Pattern to match function calls like SUM(column_name)
+        # This handles: FUNC(column), FUNC(column1, column2), etc.
+        func_pattern = r'(\w+)\s*\(\s*([^)]+)\s*\)'
+        
+        def replace_func(match):
+            func_name = match.group(1)
+            args = match.group(2).strip()
+            
+            # Split arguments by comma (for multi-argument functions)
+            arg_parts = [arg.strip() for arg in args.split(',')]
+            qualified_args = []
+            
+            for arg in arg_parts:
+                # Skip if it's already qualified (contains .) or is a literal (* or number)
+                if '.' in arg or arg == '*' or arg.isdigit() or arg.startswith('"') or arg.startswith("'"):
+                    qualified_args.append(arg)
+                else:
+                    # Apply table alias
+                    qualified_args.append(f"{self.alias}.{arg}")
+            
+            return f"{func_name}({', '.join(qualified_args)})"
+        
+        # Apply the replacement
+        result = re.sub(func_pattern, replace_func, expr)
+        return result
+
     def build(self):
         """Build complete SQL++ query."""
         parts = []
@@ -243,8 +283,9 @@ class AsterixQueryBuilder:
                 
                 # Check if it's a simple column reference or an expression
                 if "." in expr or " " in expr or "(" in expr or ")" in expr or "+" in expr or "-" in expr or "*" in expr or "/" in expr or "%" in expr:
-                    # It's an expression or already qualified column - keep as is
-                    select_parts.append(col)
+                    # It's an expression - apply table alias to unqualified column references
+                    qualified_expr = self._apply_table_alias_to_expression(expr)
+                    select_parts.append(f"{qualified_expr} AS {alias}")
                 else:
                     # Simple column - qualify with table alias
                     select_parts.append(f"{self.alias}.{expr} AS {alias}")
@@ -352,21 +393,11 @@ class AsterixQueryBuilder:
         if not self.group_by_columns:
             return ""
             
-        # Extract aliases from select_cols
-        aliases = {}
-        for col in self.select_cols:
-            if " AS " in col:
-                # Get the alias part
-                original_col, alias = col.split(" AS ", 1)
-                aliases[alias.strip()] = original_col.strip()
-        
         group_cols = []
         for col in self.group_by_columns:
-            # Check if this column is actually an alias
-            if col in aliases:
-                # Use the alias directly in GROUP BY
-                group_cols.append(col)
-            elif "." in col:
+            # GROUP BY should never use SELECT aliases per SQL++ semantics
+            # Always use the original column references
+            if "." in col:
                 # Already qualified column
                 group_cols.append(col)
             else:

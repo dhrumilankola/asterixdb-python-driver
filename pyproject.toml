@@ -7,7 +7,17 @@ name = "pyasterix"
 version = "0.1.0"
 description = "Python connector for AsterixDB"
 dependencies = [
-    "requests>=2.25.0",  # Example dependency, add others as needed
+    "requests>=2.25.0",
+    # OpenTelemetry dependencies for observability
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-prometheus>=1.12.0rc1",
+    "prometheus-client>=0.17.0",
+    # Additional tracing dependencies
+    "opentelemetry-exporter-otlp>=1.20.0",
+    "opentelemetry-exporter-jaeger>=1.20.0",
+    "opentelemetry-propagator-b3>=1.20.0",
+    "opentelemetry-instrumentation>=0.41b0",
 ]
 python = ">=3.7"
 
