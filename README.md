@@ -18,16 +18,23 @@ Core Features
 - PEP 249 compliant database interface
 - Pandas-like DataFrame API
 - Support for both synchronous and asynchronous queries
-- Comprehensive error handling
-- Connection pooling and retry mechanisms
+- Comprehensive error handling with custom, context-rich exceptions
+- Connection pooling and intelligent connection management
 - Native support for AsterixDB data types
 - Easy integration with pandas ecosystem
+- Built-in observability: metrics (Prometheus), tracing (OpenTelemetry), structured logging
 
 DB-API Features
 - Standard cursor interface
 - Transaction support (where applicable)
 - Parameterized queries
 - Multiple result fetch methods
+
+Advanced Features
+- Observability (metrics, tracing, logging) with production-ready configuration
+- Async query support (status/result handles, pooled polling)
+- Connection pool lifecycle management (validation, idle expiry, cleanup thread)
+- Error mapping from HTTP/AsterixDB payloads to precise exceptions
 - DataFrame API Features
 - Intuitive query building
 - Method chaining
@@ -44,9 +51,9 @@ DB-API Features
 
 Connection Management
 
-- Connection pooling
-- Session handling
-- Query execution
+- Connection pooling and lifecycle (validation, idle/lifetime expiry, background cleanup)
+- Session handling via HTTP sessions
+- Query execution including async/deferred modes
 
 Query Building
 
@@ -60,13 +67,25 @@ Result Processing
 - Result caching
 - Data streaming
 
+ Observability
+
+- Metrics: query durations, counts, rows fetched, pool gauges, error counters
+- Tracing: spans for execute/fetch/async/pool and DataFrame operations (OTel compatible)
+- Logging: structured JSON with trace correlation and performance-aware filtering
+
+ Exception Handling
+
+- PEP 249 standard hierarchy + AsterixDB-specific exceptions (HTTPError, NetworkError,
+  TimeoutError, SyntaxError, IdentifierError, AsyncQueryError, PoolExhaustedError, etc.)
+- Rich error context attached to each exception and `.to_dict()` serialization
+
 ## Best Practices
 
 Connection Management
 
 - Use context managers (with statements)
 - Close connections explicitly
-- Implement connection pooling for web applications
+- Implement connection pooling for web applications and batch services
 
 Query Optimization
 
@@ -79,6 +98,22 @@ Error Handling
 - Implement proper exception handling
 - Use retry mechanisms for transient failures
 - Log errors appropriately
+- Prefer catching specific driver exceptions (e.g., SyntaxError, NetworkError, TimeoutError)
+- Inspect `.context` on exceptions and leverage `.to_dict()` for structured logging
+
+ Observability
+
+- Enable metrics and tracing in non-prod first; tune sampling in prod
+- Export Prometheus metrics and view traces via OTLP/Jaeger
+- Use structured logs with correlation IDs for cross-service debugging
+
+## Documentation
+
+- Driver Overview: `docs/DRIVER_OVERVIEW.md`
+- DB-API Guide: `docs/DBAPI_GUIDE.md`
+- DataFrame Guide: `docs/DATAFRAME_GUIDE.md`
+- Observability for Developers: `docs/OBSERVABILITY_FOR_DEVELOPERS.md`
+- Exception Handling: `docs/EXCEPTION_HANDLING.md`
 
 ## Contributing
 - We welcome contributions! Please follow these steps:
