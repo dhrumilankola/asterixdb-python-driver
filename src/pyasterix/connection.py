@@ -1,7 +1,7 @@
 import requests
 from urllib.parse import urljoin
 from typing import Optional, Dict, Any
-from .exceptions import NotSupportedError, InterfaceError
+from .exceptions import NotSupportedError, InterfaceError, NetworkError
 from .cursor import Cursor
 from .observability import ObservabilityConfig, ObservabilityManager, initialize_observability
 import logging

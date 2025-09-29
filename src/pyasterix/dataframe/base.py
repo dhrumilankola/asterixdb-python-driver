@@ -1,7 +1,7 @@
 from typing import Union, List, Any, Dict, Tuple, Optional
 import pandas as pd
 from ..connection import Connection
-from src.pyasterix.exceptions import *
+from ..exceptions import DataError, DataFrameError, QueryBuildError, ErrorMapper
 from .attribute import AsterixAttribute, AsterixPredicate
 from .query import AsterixQueryBuilder
 
@@ -18,7 +18,7 @@ class AsterixDataFrame:
             dataset: Name of the dataset to query
         """
         if not isinstance(connection, Connection):
-            raise ValidationError("connection must be an instance of Connection")
+            raise DataError("connection must be an instance of Connection")
             
         self.connection = connection
         self.cursor = connection.cursor()
@@ -286,17 +286,17 @@ class AsterixDataFrame:
     def _validate_field_name(self, field: str) -> None:
         """Validate field name format."""
         if not field or not isinstance(field, str):
-            raise ValidationError("Field name must be a non-empty string")
+            raise DataError("Field name must be a non-empty string")
         
         # Split into parts (for nested fields)
         parts = field.split('.')
         if not all(self._is_valid_identifier(part) for part in parts):
-            raise ValidationError(f"Invalid field name: {field}")
+            raise DataError(f"Invalid field name: {field}")
 
     def _validate_alias(self, alias: str) -> None:
         """Validate alias format."""
         if not self._is_valid_identifier(alias):
-            raise ValidationError(f"Invalid alias: {alias}")
+            raise DataError(f"Invalid alias: {alias}")
 
     def unnest(
         self,
@@ -469,7 +469,7 @@ class AsterixDataFrame:
             if span and self.connection.observability:
                 self.connection.observability.record_span_exception(span, e)
             
-            raise QueryError(f"Failed to execute query: {str(e)}\nQuery: {query}")
+            raise DataFrameError(f"Failed to execute query: {str(e)}\nQuery: {query}")
     
     def _noop_context(self):
         """No-operation context manager for when tracing is disabled."""

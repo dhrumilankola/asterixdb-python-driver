@@ -20,7 +20,11 @@ from contextlib import contextmanager
 from urllib.parse import urljoin
 
 from .connection import Connection
-from .exceptions import DatabaseError, ConnectionError, InterfaceError
+from .exceptions import (
+    DatabaseError, NetworkError, InterfaceError, PoolExhaustedError,
+    PoolShutdownError, ConnectionValidationError, TimeoutError,
+    ErrorMapper, AsyncErrorMapper
+)
 from .observability import ObservabilityManager, ObservabilityConfig
 
 
@@ -342,7 +346,7 @@ class AsterixConnectionPool:
             ConnectionError: If unable to acquire connection within timeout
         """
         if self._shutdown:
-            raise ConnectionError("Connection pool is shut down")
+            raise PoolShutdownError("Connection pool is shut down")
         
         timeout = timeout or self.config.pool_wait_timeout
         start_time = time.time()
@@ -370,7 +374,11 @@ class AsterixConnectionPool:
                                 })
             
             if pooled_conn is None:
-                raise ConnectionError(f"Unable to acquire connection within {timeout}s")
+                raise PoolExhaustedError(
+                    f"Unable to acquire connection within {timeout}s",
+                    pool_size=len(self._all_connections),
+                    context={'timeout': timeout, 'max_pool_size': self.config.max_pool_size}
+                )
             
             # Validate connection if required
             if self.config.validate_on_borrow:
@@ -387,7 +395,10 @@ class AsterixConnectionPool:
                             yield conn
                             return
                     else:
-                        raise ConnectionError("Connection validation failed and timeout exceeded")
+                        raise ConnectionValidationError(
+                            "Connection validation failed and timeout exceeded",
+                            context={'timeout': timeout, 'remaining_timeout': 0}
+                        )
             
             # Mark as in use
             pooled_conn.mark_used()
@@ -557,7 +568,7 @@ class AsterixConnectionPool:
                                 return status_data.get("results", [])
                         
                         elif status_data.get("status") in ["failed", "fatal", "timeout"]:
-                            raise DatabaseError(f"Async query failed: {status_data}")
+                            raise AsyncErrorMapper.from_async_status(status_data, handle)
                         
                         # Still running, continue polling
                         attempts += 1
@@ -568,10 +579,15 @@ class AsterixConnectionPool:
                                 error_type="async_poll_failed",
                                 attempt=attempts
                             )
-                        raise DatabaseError(f"Async query polling failed: {e}")
+                        raise ErrorMapper.from_network_error(e, {'operation': 'async_poll', 'attempt': attempts})
                 
                 # Exceeded max polls
-                raise DatabaseError(f"Async query timeout after {max_polls} polls")
+                raise TimeoutError(
+                    f"Async query timeout after {max_polls} polls",
+                    timeout_duration=max_polls * poll_interval,
+                    operation_type="async_query_polling",
+                    context={'handle': handle, 'max_polls': max_polls, 'poll_interval': poll_interval}
+                )
                 
         except Exception as e:
             if span and self.observability:

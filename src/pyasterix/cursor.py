@@ -3,7 +3,11 @@ import json
 from urllib.parse import urljoin
 import datetime
 from typing import Optional, Any
-from .exceptions import DatabaseError, InterfaceError, NotSupportedError
+from .exceptions import (
+    DatabaseError, InterfaceError, NotSupportedError, 
+    ErrorMapper, AsyncErrorMapper, HandleError, 
+    AsyncTimeoutError, ResultProcessingError, TimeoutError
+)
 from .observability import ObservabilityManager
 
 class Cursor:
@@ -197,12 +201,36 @@ class Cursor:
                         "timeout": self.connection.timeout,
                         "connection_id": id(self.connection)
                     })
-                    raise DatabaseError(f"Query execution failed: {e}")
+                    
+                    # Use enhanced error mapping
+                    if hasattr(e, 'response'):
+                        # HTTP error with response object
+                        context = {
+                            'query': processed_query[:200],
+                            'mode': mode,
+                            'url': url,
+                            'timeout': self.connection.timeout
+                        }
+                        raise ErrorMapper.from_http_response(e.response, context)
+                    else:
+                        # Network or other error
+                        context = {
+                            'query': processed_query[:200],
+                            'mode': mode,
+                            'url': url,
+                            'timeout': self.connection.timeout,
+                            'operation': 'query_execution'
+                        }
+                        raise ErrorMapper.from_network_error(e, context)
 
                 if perf_logger:
                     perf_logger.checkpoint("response_parsing_start")
                 
-                result_data = response.json()
+                # Enhanced JSON parsing with error handling
+                try:
+                    result_data = response.json()
+                except (json.JSONDecodeError, ValueError) as e:
+                    raise ErrorMapper.from_json_error(e, response.text)
 
                 # Handle asynchronous queries with enhanced support
                 if mode == "async":
@@ -349,7 +377,7 @@ class Cursor:
             DatabaseError: If query failed or timed out
         """
         if not isinstance(self.results, dict) or "handle" not in self.results:
-            raise DatabaseError("No async query handle available")
+            raise HandleError("No async query handle available")
         
         return self._handle_async_query(self.results, timeout)
     
@@ -363,7 +391,7 @@ class Cursor:
         """
         handle = initial_response.get("handle")
         if not handle:
-            raise DatabaseError("Async query did not return a handle.")
+            raise HandleError("Async query did not return a handle.")
 
         # Use provided timeout or fall back to connection retry logic
         if timeout is not None:
@@ -398,7 +426,12 @@ class Cursor:
                 while attempts < max_retries:
                     # Check timeout if specified
                     if timeout and start_time and (time.time() - start_time) > timeout:
-                        timeout_error = DatabaseError(f"Async query timeout after {timeout}s")
+                        timeout_error = AsyncTimeoutError(
+                            f"Async query timeout after {timeout}s",
+                            timeout_duration=timeout,
+                            operation_type="async_query_polling",
+                            context={'handle': handle, 'attempts': attempts}
+                        )
                         if span and self.observability:
                             self.observability.record_span_exception(span, timeout_error)
                         raise timeout_error
@@ -448,8 +481,8 @@ class Cursor:
                                 return
                                 
                             elif status_data.get("status") == "error":
-                                error_msg = f"Async query failed: {status_data.get('errors')}"
-                                error = DatabaseError(error_msg)
+                                # Use AsyncErrorMapper for proper error handling
+                                error = AsyncErrorMapper.from_async_status(status_data, handle)
                                 
                                 if poll_span and hasattr(poll_span, 'set_attribute'):
                                     poll_span.set_attribute("db.async.result", "error")
@@ -477,9 +510,18 @@ class Cursor:
 
                 # Exceeded retry limit
                 if timeout:
-                    timeout_error = DatabaseError(f"Async query timeout after {timeout}s and {attempts} attempts")
+                    timeout_error = AsyncTimeoutError(
+                        f"Async query timeout after {timeout}s and {attempts} attempts",
+                        timeout_duration=timeout,
+                        operation_type="async_query_polling",
+                        context={'handle': handle, 'total_attempts': attempts}
+                    )
                 else:
-                    timeout_error = DatabaseError(f"Async query did not complete within {max_retries} retry attempts")
+                    timeout_error = AsyncTimeoutError(
+                        f"Async query did not complete within {max_retries} retry attempts",
+                        operation_type="async_query_polling",
+                        context={'handle': handle, 'max_retries': max_retries, 'total_attempts': attempts}
+                    )
                 
                 if span and hasattr(span, 'set_attribute'):
                     span.set_attribute("db.async.final_status", "timeout")
@@ -568,7 +610,7 @@ class Cursor:
             DatabaseError: If the query fails or an unexpected status is returned.
         """
         if not handle:
-            raise DatabaseError("No handle provided for status check.")
+            raise HandleError("No handle provided for status check.")
 
         status_url = urljoin(self.connection.base_url, handle)
         response = self.connection.session.get(status_url, timeout=self.connection.timeout)
@@ -576,7 +618,11 @@ class Cursor:
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            raise DatabaseError(f"Failed to retrieve async query status: {e}")
+            context = {'handle': handle, 'operation': 'status_check'}
+            if hasattr(e, 'response'):
+                raise ErrorMapper.from_http_response(e.response, context)
+            else:
+                raise ErrorMapper.from_network_error(e, context)
 
     def _get_query_result(self, handle: str) -> dict:
         """
@@ -592,7 +638,7 @@ class Cursor:
             DatabaseError: If the result fetching fails.
         """
         if not handle:
-            raise DatabaseError("No handle provided for result fetching.")
+            raise HandleError("No handle provided for result fetching.")
 
         result_url = urljoin(self.connection.base_url, handle)
         response = self.connection.session.get(result_url, timeout=self.connection.timeout)
@@ -600,7 +646,11 @@ class Cursor:
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            raise DatabaseError(f"Failed to retrieve async query result: {e}")
+            context = {'handle': handle, 'operation': 'result_fetch'}
+            if hasattr(e, 'response'):
+                raise ErrorMapper.from_http_response(e.response, context)
+            else:
+                raise ErrorMapper.from_network_error(e, context)
 
     def _parse_description(self, result_data: dict):
         """
